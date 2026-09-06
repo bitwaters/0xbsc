@@ -124,3 +124,27 @@ Telegram 确认成功后，系统 SHALL 异步并行取得 10/50/100U 新买入 
 
 - **WHEN** 全部路径完整且上下目标都未触达
 - **THEN** 样本计入可判定组的未触达项，而非从主命中率分母删除
+
+#### Scenario: Only the boundary candles straddle the frozen observation window
+
+- **WHEN** 行情连续且均已收盘，仅入场或目标时间落在 K 线内部
+- **THEN** 系统 SHALL 报告 bounded 覆盖与保守上下界，保持原始入场和目标不变，不将边界不确定性误计为缺失行情
+
+#### Scenario: Missing historical candles require repair
+
+- **WHEN** path-v2 结果存在缺口或尚未收盘的 K 线
+- **THEN** 系统 SHALL 使用全局加权调度进行有限次数补采，保留首次结果和原始退出报价，区分缺口与未收盘，并在预算耗尽后保留未知结论
+
+### Requirement: Prewatch work deadlines and delivery failures are distinct
+
+预观察研究 SHALL 使用独立的短请求期限，不刷新正式证据或执行正式候选恢复。推送前取消、准备失败、Telegram 发送失败与投递未知 SHALL 分别统计；历史取消不得重新投递。
+
+#### Scenario: Research outlives its original discovery event
+
+- **WHEN** 观察窗口有效但源事件已过期
+- **THEN** 研究可采集新行情，正式证据时间保持不变，失败研究释放观察容量，限流则等待后续调度
+
+#### Scenario: Buy pressure disappears before delivery
+
+- **WHEN** 最新行情在调用 Telegram 前不再满足推送规则
+- **THEN** 系统 SHALL 记录推送前取消，保留取消原因，不增加 Telegram 发送失败数

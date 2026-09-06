@@ -1,5 +1,6 @@
 import { Decimal } from 'decimal.js';
 import type { Candle } from './outcomes.js';
+import { diagnosePathCoverage } from './path-coverage.js';
 
 export type PathStatus =
   'TP' | 'SL' | 'ambiguous_same_candle' | 'not_touched' | 'pending' | 'unknown';
@@ -10,7 +11,13 @@ export interface PathContext {
 }
 export interface PathResult {
   version: 'path-v2';
-  coverage: 'complete' | 'incomplete';
+  coverage: 'complete' | 'bounded' | 'incomplete';
+  diagnostics: ReturnType<typeof diagnosePathCoverage>;
+  bounds: {
+    maxMultiple: { lower: string; upper: string | null };
+    maxEntryDrop: { lower: string; upper: string | null };
+    peakDrawdown: { lower: string; upper: string | null };
+  };
   reasons: string[];
   observedMaxMultiple: string | null;
   maxMultiple: string | null;
@@ -50,21 +57,21 @@ export function evaluatePath(
     throw new RangeError('invalid path parameters');
   const reasons = new Set<string>();
   const byTime = new Map<number, Candle>();
+  const validCandles: Candle[] = [];
+  const seen = new Map<number, Candle>();
   for (const c of candles) {
     if (c.timeMs === undefined || c.intervalMs === undefined || c.intervalMs <= 0) {
       reasons.add('missing_time');
       continue;
     }
-    if (
-      c.timeMs < context.entryAtMs ||
-      c.timeMs + c.intervalMs > context.targetAtMs ||
-      c.completed !== true
-    ) {
-      if (c.timeMs < context.entryAtMs && c.timeMs + c.intervalMs > context.entryAtMs)
-        reasons.add('entry_candle_ambiguous');
+    if (c.timeMs >= context.targetAtMs || c.timeMs + c.intervalMs <= context.entryAtMs) continue;
+    let values: Decimal[];
+    try {
+      values = [c.high, c.low, c.close].map((v) => new Decimal(v));
+    } catch {
+      reasons.add('invalid_ohlc');
       continue;
     }
-    const values = [c.high, c.low, c.close].map((v) => new Decimal(v));
     if (
       values.some((v) => !v.isFinite() || v.lte(0)) ||
       values[0]!.lt(values[1]!) ||
@@ -74,19 +81,32 @@ export function evaluatePath(
       reasons.add('invalid_ohlc');
       continue;
     }
+    const duplicate = seen.get(c.timeMs);
+    if (duplicate && JSON.stringify(duplicate) !== JSON.stringify(c))
+      reasons.add('conflicting_duplicate');
+    seen.set(c.timeMs, c);
+    validCandles.push(c);
+    if (c.timeMs < context.entryAtMs) reasons.add('entry_candle_ambiguous');
+    if (c.timeMs + c.intervalMs > context.targetAtMs) reasons.add('target_candle_ambiguous');
+    if (
+      c.timeMs < context.entryAtMs ||
+      c.timeMs + c.intervalMs > context.targetAtMs ||
+      !c.completed
+    )
+      continue;
     const previous = byTime.get(c.timeMs);
     if (previous && JSON.stringify(previous) !== JSON.stringify(c))
       reasons.add('conflicting_duplicate');
     byTime.set(c.timeMs, c);
   }
   const sorted = [...byTime.values()].sort((a, b) => a.timeMs! - b.timeMs!);
-  let cursor = context.entryAtMs;
-  for (const c of sorted) {
-    if (c.timeMs !== cursor) reasons.add('coverage_gap');
-    cursor = c.timeMs! + c.intervalMs!;
-  }
-  if (cursor !== context.targetAtMs || !sorted.length) reasons.add('coverage_gap');
+  const diagnostics = diagnosePathCoverage(validCandles, context.entryAtMs, context.targetAtMs);
+  if (diagnostics.missingRanges.length) reasons.add('coverage_gap');
+  if (diagnostics.pendingRanges.length) reasons.add('candles_not_closed');
   const complete = reasons.size === 0;
+  const bounded = [...reasons].every(
+    (r) => r === 'entry_candle_ambiguous' || r === 'target_candle_ambiguous'
+  );
   const ratios = sorted.map((c) => ({
     c,
     high: new Decimal(c.high).div(entry),
@@ -143,9 +163,14 @@ export function evaluatePath(
       for (const c of ordered) {
         const end = c.timeMs! + c.intervalMs!;
         if (end <= context.entryAtMs || end <= coveredThrough) continue;
-        if (c.timeMs! > coveredThrough || end > context.targetAtMs || !c.completed) break;
+        if (c.timeMs! > coveredThrough || !c.completed) break;
         const up = new Decimal(c.high).div(entry).gte(multiple),
           down = new Decimal(c.low).div(entry).lte(1 - stopLoss);
+        // A whole boundary bar inside both barriers proves no touch in its subinterval.
+        if (end > context.targetAtMs) {
+          if (!up && !down) coveredThrough = context.targetAtMs;
+          break;
+        }
         if (c.timeMs! < context.entryAtMs && (up || down)) break;
         if (up || down) {
           status = up && down ? 'ambiguous_same_candle' : up ? 'TP' : 'SL';
@@ -162,11 +187,40 @@ export function evaluatePath(
   const observedMaxMultiple = ratios.length
     ? Decimal.max(1, ...ratios.map((r) => r.high)).toString()
     : null;
+  const closed = validCandles.filter((c) => c.completed);
+  const knownCloses = closed
+    .filter((c) => c.timeMs! + c.intervalMs! <= context.targetAtMs)
+    .map((c) => new Decimal(c.close).div(entry));
+  const upperKnown = complete || bounded;
+  const trusted = !['invalid_ohlc', 'missing_time', 'conflicting_duplicate'].some((r) =>
+    reasons.has(r)
+  );
+  const maxUpper = Decimal.max(1, ...closed.map((c) => new Decimal(c.high).div(entry)));
+  const lowLower = Decimal.min(1, ...closed.map((c) => new Decimal(c.low).div(entry)));
   return {
     version: 'path-v2',
-    coverage: complete ? 'complete' : 'incomplete',
+    coverage: complete ? 'complete' : bounded ? 'bounded' : 'incomplete',
+    diagnostics,
+    bounds: {
+      maxMultiple: {
+        lower: trusted
+          ? Decimal.max(1, ...ratios.map((r) => r.high), ...knownCloses).toString()
+          : '1',
+        upper: upperKnown ? maxUpper.toString() : null
+      },
+      maxEntryDrop: {
+        lower: trusted
+          ? Decimal.max(drop, new Decimal(1).minus(Decimal.min(1, ...knownCloses))).toString()
+          : '0',
+        upper: upperKnown ? new Decimal(1).minus(lowLower).toString() : null
+      },
+      peakDrawdown: {
+        lower: trusted ? drawdownLower.toString() : '0',
+        upper: upperKnown ? new Decimal(1).minus(lowLower.div(maxUpper)).toString() : null
+      }
+    },
     reasons: [...reasons],
-    observedMaxMultiple,
+    observedMaxMultiple: trusted ? observedMaxMultiple : null,
     maxMultiple: complete ? observedMaxMultiple : null,
     maxEntryDrop: complete ? drop.toString() : null,
     peakDrawdownLower: complete ? drawdownLower.toString() : null,

@@ -69,3 +69,33 @@ history in place.
 Collect stdout JSON logs with the host's container logging policy and bound retention by size and
 age. Secret rotation is a controlled restart: replace the protected credential file, preserve its ownership and permissions,
 then restart the single container. Configuration history stores only sanitized snapshots and hashes.
+
+## Runtime quality repairs (2026-09-06)
+
+Prewatch research uses a fresh 30-second request budget while preserving the source event's
+original timestamps and evidence expiry. It cannot refresh formal evidence or run formal READY
+recovery. Rejected or failed research releases its bounded watch slot; rate limiting retains the
+watch for a later scheduled attempt.
+
+Migration 013 separates pre-send cancellations, preparation failures, Telegram transport failures,
+and unknown delivery in durable metrics. Historical terminal `SEND_FAILED` states and original
+error/timestamp fields remain intact for compatibility; use `delivery_failure_kind` to interpret
+that state. Cancellations do not trigger automatic resending or count as Telegram failures.
+
+Path evaluation keeps the frozen entry price/time and target. Boundary OHLC uncertainty is
+reported as `bounded`, with conservative price/drawdown bounds; actual gaps and unfinished
+candles remain `incomplete` with separate diagnostics. Missing bars are never synthesized or
+assumed to mean no trades. Proven first touches remain valid only when the preceding path is
+known. Unknown/ambiguous observations do not become losses.
+
+Each capture may make at most two targeted gap requests, within the existing shared weighted
+GMGN scheduler. Incomplete paths receive at most three captures, at least 30 seconds apart.
+Boundary-only uncertainty does not retry indefinitely. Captures use actual fetch time when
+checking candle closure. Retries preserve initial checkpoint evidence and original exit quotes;
+a late quote cannot replace a missing historical executable exit.
+
+At first upgrade, up to 100 incomplete path-v2 checkpoints from the last 24 hours are queued
+for bounded repair. Legacy samples are excluded. `initial_checkpoint_json` preserves the
+original result; entry/target/horizon coordinates remain unchanged. The report exposes repaired
+checkpoint counts, bounded coverage, pending repairs and coverage reasons. These counters are
+not evidence of signal profitability or permission to enable a shadow strategy.

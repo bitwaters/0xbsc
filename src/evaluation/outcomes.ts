@@ -79,6 +79,7 @@ export async function evaluateAndStoreOutcome(
     nowMs: number;
     pathContext?: PathContext;
     targetMultiples?: readonly number[];
+    repairPolicy?: { attempt: number; maxAttempts: number; retryDelayMs: number };
   }
 ): Promise<Outcome> {
   const outcome = evaluateOutcome(
@@ -110,7 +111,26 @@ export async function evaluateAndStoreOutcome(
     signalId: input.signalId,
     checkpointMinutes: input.checkpointMinutes,
     outcome,
-    nowMs: input.nowMs
+    nowMs: input.nowMs,
+    retryAtMs:
+      outcome.path && input.pathContext && input.repairPolicy
+        ? pathRepairAt(outcome.path, input.pathContext.targetAtMs, input.nowMs, input.repairPolicy)
+        : null
   });
   return outcome;
+}
+
+export function pathRepairAt(
+  path: PathResult,
+  targetAtMs: number,
+  nowMs: number,
+  policy: { attempt: number; maxAttempts: number; retryDelayMs: number }
+): number | null {
+  if (
+    policy.attempt >= policy.maxAttempts ||
+    path.coverage !== 'incomplete' ||
+    (!path.diagnostics.missingRanges.length && !path.diagnostics.pendingRanges.length)
+  )
+    return null;
+  return Math.max(nowMs + policy.retryDelayMs, Math.ceil(targetAtMs / 30_000) * 30_000 + 1000);
 }

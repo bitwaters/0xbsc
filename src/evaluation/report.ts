@@ -14,6 +14,15 @@ export function pathQualityReport(db: Database.Database) {
       )
       .get() as { n: number }
   ).n;
+  const repairedCheckpoints = schema.some((c) => c.name === 'initial_checkpoint_json')
+    ? (
+        db
+          .prepare(
+            'SELECT count(*) AS n FROM price_samples WHERE initial_checkpoint_json IS NOT NULL AND path_capture_attempts>0'
+          )
+          .get() as { n: number }
+      ).n
+    : 0;
   // Select earliest Episode per token+route+cohort, and latest available result within it.
   const rows = db
     .prepare(
@@ -39,6 +48,9 @@ export function pathQualityReport(db: Database.Database) {
     {
       total: number;
       completePaths: number;
+      boundedPaths: number;
+      repairPending: number;
+      coverageReasons: Record<string, number>;
       maxMultiples: number[];
       entryDrops: number[];
       statuses: Map<string, PathStatus[]>;
@@ -74,6 +86,9 @@ export function pathQualityReport(db: Database.Database) {
       g = groups.get(key) ?? {
         total: 0,
         completePaths: 0,
+        boundedPaths: 0,
+        repairPending: 0,
+        coverageReasons: {},
         maxMultiples: [],
         entryDrops: [],
         statuses: new Map<string, PathStatus[]>()
@@ -92,6 +107,11 @@ export function pathQualityReport(db: Database.Database) {
         })
       : {};
     const path = parsed.outcome?.path;
+    const reasons = (path as { reasons?: string[] } | undefined)?.reasons ?? [];
+    for (const reason of new Set(reasons))
+      g.coverageReasons[reason] = (g.coverageReasons[reason] ?? 0) + 1;
+    if (path?.coverage === 'bounded') g.boundedPaths++;
+    if (row.status === 'PENDING' && path) g.repairPending++;
     if (path?.coverage === 'complete') {
       g.completePaths++;
       if (path.maxMultiple !== null && path.maxMultiple !== undefined)
@@ -108,7 +128,8 @@ export function pathQualityReport(db: Database.Database) {
   }
   return {
     status: 'ok',
-    historicalRecomputed: false,
+    historicalRecomputed: repairedCheckpoints > 0,
+    repairedCheckpoints,
     legacyCheckpoints: legacy,
     deduplication: 'earliest Episode per revision/token/route/cohort; latest completed checkpoint',
     groups: Object.fromEntries(
@@ -117,6 +138,9 @@ export function pathQualityReport(db: Database.Database) {
         {
           total: g.total,
           completePaths: g.completePaths,
+          boundedPaths: g.boundedPaths,
+          repairPending: g.repairPending,
+          coverageReasons: g.coverageReasons,
           maxMultipleMedian: median(g.maxMultiples),
           maxEntryDropMedian: median(g.entryDrops),
           barriers: Object.fromEntries(

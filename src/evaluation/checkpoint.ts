@@ -1,6 +1,20 @@
 import type { Candle } from './outcomes.js';
 import type { QuoteProvider, QuoteLeg } from '../quote/gate.js';
 import type { Storage } from '../storage/database.js';
+import { mergeMarketPaths } from './path-coverage.js';
+
+export interface CapturedCheckpoint {
+  candles: Candle[];
+  exitLate: boolean;
+  exitQuotes: Array<{
+    sizeUsd: number;
+    entryUsd: string;
+    quote: QuoteLeg | null;
+    requestedAtMs: number;
+    completedAtMs: number;
+    late: boolean;
+  }>;
+}
 
 export interface MarketPathProvider {
   candles(input: { episodeId: string; fromMs: number; toMs: number }): Promise<Candle[]>;
@@ -21,55 +35,53 @@ export async function captureOutcomeCheckpoint(
     targetAtMs: number;
     now?: () => number;
   }
-): Promise<{
-  candles: Candle[];
-  exitLate: boolean;
-  exitQuotes: Array<{
-    sizeUsd: number;
-    entryUsd: string;
-    quote: QuoteLeg | null;
-    requestedAtMs: number;
-    completedAtMs: number;
-    late: boolean;
-  }>;
-}> {
+): Promise<CapturedCheckpoint> {
   const now = input.now ?? Date.now;
   const requestedAtMs = now();
+  const previous = (await storage.readOutcomeCheckpoint(
+    input.taskId,
+    input.episodeId,
+    input.signalId
+  )) as Partial<CapturedCheckpoint> | null;
   const entryQuotes =
     input.formal && input.signalId ? await storage.completedEntryQuotes(input.signalId) : [];
-  const [candles, exits] = await Promise.all([
+  const [freshCandles, exits] = await Promise.all([
     market.candles({ episodeId: input.episodeId, fromMs: input.entryAtMs, toMs: input.targetAtMs }),
-    Promise.all(
-      entryQuotes.map(async (entry) => {
-        const quoteRequestedAtMs = now();
-        try {
-          const quote = await quotes.sell(entry.outputTokenAmount);
-          const quoteCompletedAtMs = now();
-          return {
-            sizeUsd: entry.sizeUsd,
-            entryUsd: entry.inputUsd,
-            quote,
-            requestedAtMs: quoteRequestedAtMs,
-            completedAtMs: quoteCompletedAtMs,
-            late:
-              quoteRequestedAtMs < input.targetAtMs ||
-              quoteCompletedAtMs - input.targetAtMs > 10_000
-          };
-        } catch {
-          return {
-            sizeUsd: entry.sizeUsd,
-            entryUsd: entry.inputUsd,
-            quote: null,
-            requestedAtMs: quoteRequestedAtMs,
-            completedAtMs: now(),
-            late: true
-          };
-        }
-      })
-    )
+    previous?.exitQuotes !== undefined
+      ? Promise.resolve(previous.exitQuotes)
+      : Promise.all(
+          entryQuotes.map(async (entry) => {
+            const quoteRequestedAtMs = now();
+            try {
+              const quote = await quotes.sell(entry.outputTokenAmount);
+              const quoteCompletedAtMs = now();
+              return {
+                sizeUsd: entry.sizeUsd,
+                entryUsd: entry.inputUsd,
+                quote,
+                requestedAtMs: quoteRequestedAtMs,
+                completedAtMs: quoteCompletedAtMs,
+                late:
+                  quoteRequestedAtMs < input.targetAtMs ||
+                  quoteCompletedAtMs - input.targetAtMs > 10_000
+              };
+            } catch {
+              return {
+                sizeUsd: entry.sizeUsd,
+                entryUsd: entry.inputUsd,
+                quote: null,
+                requestedAtMs: quoteRequestedAtMs,
+                completedAtMs: now(),
+                late: true
+              };
+            }
+          })
+        )
   ]);
   const completedAtMs = now();
-  const exitLate = input.formal && requestedAtMs - input.targetAtMs > 10_000;
+  const candles = mergeMarketPaths(previous?.candles ?? [], freshCandles);
+  const exitLate =
+    previous?.exitLate ?? (input.formal && requestedAtMs - input.targetAtMs > 10_000);
   await storage.recordOutcomeCheckpoint({
     taskId: input.taskId,
     episodeId: input.episodeId,

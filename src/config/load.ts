@@ -234,6 +234,9 @@ const runtimeConfigSchema = z
         checkpoints_minutes: z.array(z.number().positive()).min(1),
         narrative_checkpoints_minutes: z.array(z.number().positive()),
         unsent_tracking_minutes: z.number().positive(),
+        path_max_capture_attempts: z.number().int().min(1).max(5).default(3),
+        path_retry_seconds: z.number().int().min(30).max(300).default(30),
+        path_max_gap_requests: z.number().int().min(0).max(4).default(2),
         take_profit_percent: percentage,
         stop_loss_percent: percentage
       })

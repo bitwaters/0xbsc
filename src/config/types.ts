@@ -139,6 +139,9 @@ export interface RuntimeConfig {
     checkpoints_minutes: number[];
     narrative_checkpoints_minutes: number[];
     unsent_tracking_minutes: number;
+    path_max_capture_attempts?: number;
+    path_retry_seconds?: number;
+    path_max_gap_requests?: number;
     take_profit_percent: number;
     stop_loss_percent: number;
   };

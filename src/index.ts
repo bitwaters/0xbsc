@@ -11,7 +11,7 @@ import { GmgnApi, ScheduledCandidateGmgnApi } from './gmgn/api.js';
 import { GmgnClient, GmgnError, gmgnRetryDeadline } from './gmgn/client.js';
 import { GmgnScheduler, type Clock, type Priority } from './gmgn/scheduler.js';
 import { preSendRejection } from './decision/pre-send.js';
-import { withCandidateRecovery } from './decision/recovery.js';
+import { runCandidateScope } from './decision/candidate-scope.js';
 import { ShadowEvaluator } from './decision/shadow.js';
 import { RouteRuntime } from './decision/runtime.js';
 import { staggeredEvaluationAtMs } from './decision/episode-policy.js';
@@ -48,6 +48,9 @@ const clock: Clock = {
   random: Math.random
 };
 const storage = await Storage.open(loaded.config.storage.sqlite_path);
+const repairTasks = await storage.requeueIncompletePaths(Date.now());
+if (repairTasks)
+  console.log(JSON.stringify({ event: 'historical_path_repairs_queued', count: repairTasks }));
 const metrics = new MetricsCollector();
 await storage.recordConfigRevision(loaded.revisionId, loaded.sanitizedSnapshot, clock.now());
 await storage.expireOutdatedConfiguration(loaded.revisionId, clock.now());
@@ -130,552 +133,351 @@ const processCandidate = (
   const timeline = new OperationTimeline(storage, undefined, () => clock.now());
   void timeline.record('source_event', { eventKey: event.key, tokenAddress: event.tokenAddress });
   const precheck = safety.precheck(event);
-  const evidenceObservation = precheck.allowed ? routes.observe(event) : null;
+  const evidenceObservation =
+    precheck.allowed && !options.researchOnly ? routes.observe(event) : null;
   return candidateSerial.enqueue(event.tokenAddress, () =>
-    withGmgnContext({ correlationId: timeline.correlationId, deadlineMs: event.expiresAtMs }, () =>
-      withCandidateRecovery(
-        storage,
-        event.tokenAddress,
-        () => clock.now(),
-        async () => {
-          await timeline.record('queue', { tokenAddress: event.tokenAddress });
-          if (!precheck.allowed) {
-            if (precheck.rejectionReason === 'unmapped_signal_type') {
-              await timeline.record('decision', {
-                decision: 'ignored',
-                reason: 'unmapped_signal_type'
-              });
-              return;
-            }
-            await storage.recordSentRisk(
-              event.tokenAddress,
-              'failed',
-              precheck.rejectionReason,
-              clock.now()
-            );
-            metrics.increment('safetyRejected');
-            if (options.observationEpisodeId)
-              await storage.rejectEpisodeSafetyGate({
-                episodeId: options.observationEpisodeId,
-                reason: precheck.rejectionReason ?? 'precheck_rejected',
-                snapshot: { event: event.payload },
-                nowMs: clock.now()
-              });
+    runCandidateScope(
+      storage,
+      event,
+      {
+        researchOnly: options.researchOnly ?? false,
+        correlationId: timeline.correlationId,
+        now: () => clock.now()
+      },
+      async () => {
+        await timeline.record('queue', { tokenAddress: event.tokenAddress });
+        if (!precheck.allowed) {
+          if (options.researchOnly) await storage.removeCandidateWatch(event.tokenAddress);
+          if (precheck.rejectionReason === 'unmapped_signal_type') {
             await timeline.record('decision', {
-              decision: 'rejected',
-              reason: precheck.rejectionReason
+              decision: 'ignored',
+              reason: 'unmapped_signal_type'
             });
             return;
           }
-          if (!evidenceObservation?.eligibleForDeepAnalysis && !options.researchOnly) {
-            if (
-              loaded.config.optimization.enabled &&
-              event.decisionEligible !== false &&
-              event.payload.contrary !== true
-            )
-              await storage.watchCandidate(
-                event,
-                clock.now(),
-                loaded.config.optimization.prewatch_capacity,
-                loaded.config.optimization.prewatch_expiry_minutes * 60_000,
-                loaded.config.optimization.prewatch_seconds * 1000,
-                'insufficient_evidence'
-              );
-            if (options.observationEpisodeId)
-              await storage.holdObservation(
-                options.observationEpisodeId,
-                'evidence_expired',
-                clock.now(),
-                loaded.config.optimization.soft_failure_grace_seconds * 1000
-              );
-            await timeline.record('decision', {
-              decision: 'insufficient_evidence',
-              evidenceFamilies: evidenceObservation?.evidence.map((item) => item.family) ?? []
-            });
-            return;
-          }
-          let result = await safety.process(event, { priority: options.priority ?? 'candidate' });
-          if (result.allowed && !result.usedCache) metrics.increment('deepAnalyses');
-          if (!result.allowed) {
-            metrics.increment('safetyRejected');
-            await storage.recordSentRisk(
-              event.tokenAddress,
-              'failed',
-              result.rejectionReason,
-              clock.now()
-            );
-          }
-          await timeline.record('api_batch', { safetyAllowed: result.allowed });
-          if (!result.allowed && options.observationEpisodeId) {
+          await storage.recordSentRisk(
+            event.tokenAddress,
+            'failed',
+            precheck.rejectionReason,
+            clock.now()
+          );
+          metrics.increment('safetyRejected');
+          if (options.observationEpisodeId)
             await storage.rejectEpisodeSafetyGate({
               episodeId: options.observationEpisodeId,
-              reason: result.rejectionReason ?? 'safety_rejected',
-              snapshot: { event: event.payload, safety: result },
+              reason: precheck.rejectionReason ?? 'precheck_rejected',
+              snapshot: { event: event.payload },
               nowMs: clock.now()
             });
-            await timeline.record('decision', {
-              decision: 'rejected',
-              reason: result.rejectionReason ?? 'safety_rejected'
-            });
-            return;
-          }
-          const preliminaryEvaluation = result.allowed
-            ? await routes.classify(event, result.info, {
-                eventAlreadyObserved: true,
-                ...(options.researchOnly ? { researchOnly: true } : {}),
-                infoObservedAtMs: result.assessedAtMs,
-                pool: result.pool,
-                poolObservedAtMs: result.assessedAtMs,
-                priority: options.priority ?? 'candidate',
-                ...(options.forceKline === undefined ? {} : { forceKline: options.forceKline })
-              })
-            : null;
-          if (loaded.config.optimization.enabled && result.allowed) {
-            const shadowDecision = shadow.evaluate(
-              event.tokenAddress,
-              result.info,
-              preliminaryEvaluation,
-              clock.now()
-            );
-            await storage.recordShadowDecision(
-              event.tokenAddress,
-              options.observationEpisodeId ?? null,
-              loaded.revisionId,
-              clock.now(),
-              shadowDecision
-            );
-            if (options.researchOnly)
-              await storage.updateWatchSnapshot(
-                event.tokenAddress,
-                clock.now(),
-                shadowDecision,
-                shadowDecision.watchPriority,
-                loaded.config.optimization.prewatch_hot_capacity,
-                loaded.config.optimization.minimum_spacing_seconds * 1000,
-                loaded.config.optimization.prewatch_seconds * 1000
-              );
-          }
-          if (options.researchOnly) return;
-          const lazyGate =
-            preliminaryEvaluation?.decision === 'formal' && result.info !== undefined
-              ? await lazySafety.evaluate(event.tokenAddress, result.info)
-              : null;
-          const waitingForTraderBaseline =
-            lazyGate?.allowed === false && lazyGate.reason?.startsWith('trader_') === true;
-          const evaluation =
-            waitingForTraderBaseline && preliminaryEvaluation
-              ? { ...preliminaryEvaluation, decision: 'observing' as const }
-              : preliminaryEvaluation && lazyGate?.allowed && lazyGate.creatorHistory
-                ? routes.applyCreatorHistoryQuality(
-                    preliminaryEvaluation,
-                    lazyGate.creatorHistory.qualityLevel
-                  )
-                : preliminaryEvaluation;
-          if (options.observationEpisodeId && !evaluation?.route) {
-            const evidenceStillEligible = routes.currentEvidence(
-              event.tokenAddress
-            ).eligibleForDeepAnalysis;
-            const held = await storage.holdObservation(
-              options.observationEpisodeId,
-              evidenceStillEligible ? 'route_no_longer_qualified' : 'evidence_expired',
-              clock.now(),
-              loaded.config.optimization.soft_failure_grace_seconds * 1000
-            );
-            await timeline.record('decision', {
-              decision: held ? 'observing' : 'observation_expired',
-              reason: evidenceStillEligible ? 'route_no_longer_qualified' : 'evidence_expired',
-              features: evaluation?.features ?? null,
-              evidence: evaluation?.evidence ?? []
-            });
-            return;
-          }
-          const creatorScoreAdjustment =
-            preliminaryEvaluation?.score && evaluation?.score && lazyGate?.creatorHistory
-              ? {
-                  baseScore: preliminaryEvaluation.score.score,
-                  adjustedScore: evaluation.score.score,
-                  penalty: preliminaryEvaluation.score.score - evaluation.score.score,
-                  ...lazyGate.creatorHistory
-                }
-              : null;
-          if (!evaluation?.route && loaded.config.optimization.enabled && result.allowed)
+          await timeline.record('decision', {
+            decision: 'rejected',
+            reason: precheck.rejectionReason
+          });
+          return;
+        }
+        if (!evidenceObservation?.eligibleForDeepAnalysis && !options.researchOnly) {
+          if (
+            loaded.config.optimization.enabled &&
+            event.decisionEligible !== false &&
+            event.payload.contrary !== true
+          )
             await storage.watchCandidate(
               event,
               clock.now(),
               loaded.config.optimization.prewatch_capacity,
               loaded.config.optimization.prewatch_expiry_minutes * 60_000,
               loaded.config.optimization.prewatch_seconds * 1000,
-              'route_not_formed'
+              'insufficient_evidence'
             );
-          const route = evaluation?.route ?? null;
-          const episodeId = route ? randomUUID() : null;
-          const episode = route
-            ? await storage.claimEpisode({
-                id: episodeId!,
-                tokenAddress: event.tokenAddress,
-                route,
-                configRevisionId: loaded.revisionId,
-                nowMs: clock.now(),
-                triggerAtMs: evaluation?.decisiveTriggerAtMs ?? null,
-                decisiveWindowMs: loaded.config.scoring.decisive_trigger_seconds[route] * 1_000,
-                resetSatisfied:
-                  evaluation?.features !== null && evaluation?.features !== undefined
-                    ? routeResetSatisfied(route, {
-                        hasCompletedDormancy: evaluation.features.hasCompletedDormancy,
-                        hasHealthyPullbackAndRestart:
-                          evaluation.features.healthyPullback && evaluation.features.restartVolume
-                      })
-                    : false,
-                reentryCooldownMsByReason: {
-                  coordinated_smart_money_exit:
-                    loaded.config.scoring.data_ttl_seconds.traders * 1000,
-                  coordinated_smart_money_exit_unverified:
-                    loaded.config.scoring.data_ttl_seconds.traders * 1_000,
-                  concentrated_holdings_unverified:
-                    loaded.config.scoring.data_ttl_seconds.holders * 1_000,
-                  creator_direct_hold_unverified:
-                    loaded.config.scoring.data_ttl_seconds.creator * 1_000,
-                  creator_history_unverified:
-                    loaded.config.scoring.data_ttl_seconds.creator * 1_000,
-                  creator_abuse_unverified: loaded.config.scoring.data_ttl_seconds.creator * 1_000
-                }
-              })
-            : null;
-          const activeEpisodeId =
-            episode === 'created'
-              ? episodeId
-              : route
-                ? await storage.activeEpisodeId(event.tokenAddress, route)
-                : null;
-          if (options.observationEpisodeId && activeEpisodeId !== options.observationEpisodeId)
-            await storage.expireObservation(
+          if (options.observationEpisodeId)
+            await storage.holdObservation(
               options.observationEpisodeId,
-              'route_changed',
-              clock.now()
+              'evidence_expired',
+              clock.now(),
+              loaded.config.optimization.soft_failure_grace_seconds * 1000
             );
-          const observationAdmission =
-            activeEpisodeId && route && evaluation?.decision === 'observing' && evaluation.score
-              ? await storage.admitObservation({
-                  episodeId: activeEpisodeId,
-                  route,
-                  score: evaluation.score.score,
-                  completeness: evaluation.score.completeness,
-                  evidenceFreshness: evaluation.evidence.length,
-                  capacity: loaded.config.observation.max_active_episodes,
-                  softRouteTarget: loaded.config.observation.soft_route_target,
-                  nextEvaluationAtMs: staggeredEvaluationAtMs(
-                    clock.now(),
-                    event.tokenAddress,
-                    route
-                  ),
-                  expiresAtMs: episodeExpiryAtMs(
-                    clock.now(),
-                    route,
-                    loaded.config.observation.expiry_minutes,
-                    evaluation.evidence.some((item) => item.narrative)
-                  ),
-                  nowMs: clock.now()
-                })
+          await timeline.record('decision', {
+            decision: 'insufficient_evidence',
+            evidenceFamilies: evidenceObservation?.evidence.map((item) => item.family) ?? []
+          });
+          return;
+        }
+        let result = await safety.process(event, { priority: options.priority ?? 'candidate' });
+        if (result.allowed && !result.usedCache) metrics.increment('deepAnalyses');
+        if (!result.allowed) {
+          if (options.researchOnly) await storage.removeCandidateWatch(event.tokenAddress);
+          metrics.increment('safetyRejected');
+          await storage.recordSentRisk(
+            event.tokenAddress,
+            'failed',
+            result.rejectionReason,
+            clock.now()
+          );
+        }
+        await timeline.record('api_batch', { safetyAllowed: result.allowed });
+        if (!result.allowed && options.observationEpisodeId) {
+          await storage.rejectEpisodeSafetyGate({
+            episodeId: options.observationEpisodeId,
+            reason: result.rejectionReason ?? 'safety_rejected',
+            snapshot: { event: event.payload, safety: result },
+            nowMs: clock.now()
+          });
+          await timeline.record('decision', {
+            decision: 'rejected',
+            reason: result.rejectionReason ?? 'safety_rejected'
+          });
+          return;
+        }
+        const preliminaryEvaluation = result.allowed
+          ? await routes.classify(event, result.info, {
+              eventAlreadyObserved: true,
+              ...(options.researchOnly ? { researchOnly: true } : {}),
+              infoObservedAtMs: result.assessedAtMs,
+              pool: result.pool,
+              poolObservedAtMs: result.assessedAtMs,
+              priority: options.priority ?? 'candidate',
+              ...(options.forceKline === undefined ? {} : { forceKline: options.forceKline })
+            })
+          : null;
+        if (loaded.config.optimization.enabled && result.allowed) {
+          const shadowDecision = shadow.evaluate(
+            event.tokenAddress,
+            result.info,
+            preliminaryEvaluation,
+            clock.now()
+          );
+          await storage.recordShadowDecision(
+            event.tokenAddress,
+            options.observationEpisodeId ?? null,
+            loaded.revisionId,
+            clock.now(),
+            shadowDecision
+          );
+          if (options.researchOnly)
+            await storage.updateWatchSnapshot(
+              event.tokenAddress,
+              clock.now(),
+              shadowDecision,
+              shadowDecision.watchPriority,
+              loaded.config.optimization.prewatch_hot_capacity,
+              loaded.config.optimization.minimum_spacing_seconds * 1000,
+              loaded.config.optimization.prewatch_seconds * 1000
+            );
+        }
+        if (options.researchOnly) return;
+        const lazyGate =
+          preliminaryEvaluation?.decision === 'formal' && result.info !== undefined
+            ? await lazySafety.evaluate(event.tokenAddress, result.info)
+            : null;
+        const waitingForTraderBaseline =
+          lazyGate?.allowed === false && lazyGate.reason?.startsWith('trader_') === true;
+        const evaluation =
+          waitingForTraderBaseline && preliminaryEvaluation
+            ? { ...preliminaryEvaluation, decision: 'observing' as const }
+            : preliminaryEvaluation && lazyGate?.allowed && lazyGate.creatorHistory
+              ? routes.applyCreatorHistoryQuality(
+                  preliminaryEvaluation,
+                  lazyGate.creatorHistory.qualityLevel
+                )
+              : preliminaryEvaluation;
+        if (options.observationEpisodeId && !evaluation?.route) {
+          const evidenceStillEligible = routes.currentEvidence(
+            event.tokenAddress
+          ).eligibleForDeepAnalysis;
+          const held = await storage.holdObservation(
+            options.observationEpisodeId,
+            evidenceStillEligible ? 'route_no_longer_qualified' : 'evidence_expired',
+            clock.now(),
+            loaded.config.optimization.soft_failure_grace_seconds * 1000
+          );
+          await timeline.record('decision', {
+            decision: held ? 'observing' : 'observation_expired',
+            reason: evidenceStillEligible ? 'route_no_longer_qualified' : 'evidence_expired',
+            features: evaluation?.features ?? null,
+            evidence: evaluation?.evidence ?? []
+          });
+          return;
+        }
+        const creatorScoreAdjustment =
+          preliminaryEvaluation?.score && evaluation?.score && lazyGate?.creatorHistory
+            ? {
+                baseScore: preliminaryEvaluation.score.score,
+                adjustedScore: evaluation.score.score,
+                penalty: preliminaryEvaluation.score.score - evaluation.score.score,
+                ...lazyGate.creatorHistory
+              }
+            : null;
+        if (!evaluation?.route && loaded.config.optimization.enabled && result.allowed)
+          await storage.watchCandidate(
+            event,
+            clock.now(),
+            loaded.config.optimization.prewatch_capacity,
+            loaded.config.optimization.prewatch_expiry_minutes * 60_000,
+            loaded.config.optimization.prewatch_seconds * 1000,
+            'route_not_formed'
+          );
+        const route = evaluation?.route ?? null;
+        const episodeId = route ? randomUUID() : null;
+        const episode = route
+          ? await storage.claimEpisode({
+              id: episodeId!,
+              tokenAddress: event.tokenAddress,
+              route,
+              configRevisionId: loaded.revisionId,
+              nowMs: clock.now(),
+              triggerAtMs: evaluation?.decisiveTriggerAtMs ?? null,
+              decisiveWindowMs: loaded.config.scoring.decisive_trigger_seconds[route] * 1_000,
+              resetSatisfied:
+                evaluation?.features !== null && evaluation?.features !== undefined
+                  ? routeResetSatisfied(route, {
+                      hasCompletedDormancy: evaluation.features.hasCompletedDormancy,
+                      hasHealthyPullbackAndRestart:
+                        evaluation.features.healthyPullback && evaluation.features.restartVolume
+                    })
+                  : false,
+              reentryCooldownMsByReason: {
+                coordinated_smart_money_exit: loaded.config.scoring.data_ttl_seconds.traders * 1000,
+                coordinated_smart_money_exit_unverified:
+                  loaded.config.scoring.data_ttl_seconds.traders * 1_000,
+                concentrated_holdings_unverified:
+                  loaded.config.scoring.data_ttl_seconds.holders * 1_000,
+                creator_direct_hold_unverified:
+                  loaded.config.scoring.data_ttl_seconds.creator * 1_000,
+                creator_history_unverified: loaded.config.scoring.data_ttl_seconds.creator * 1_000,
+                creator_abuse_unverified: loaded.config.scoring.data_ttl_seconds.creator * 1_000
+              }
+            })
+          : null;
+        const activeEpisodeId =
+          episode === 'created'
+            ? episodeId
+            : route
+              ? await storage.activeEpisodeId(event.tokenAddress, route)
               : null;
-          if (activeEpisodeId && route && evaluation?.decision === 'rejected')
-            await storage.rescheduleObservation(
-              activeEpisodeId,
-              staggeredEvaluationAtMs(clock.now(), event.tokenAddress, route),
-              clock.now()
-            );
-          if (activeEpisodeId && evaluation?.decision && evaluation.score)
-            if (observationAdmission?.admitted !== false)
-              await storage.recordEpisodeDecision({
+        if (options.observationEpisodeId && activeEpisodeId !== options.observationEpisodeId)
+          await storage.expireObservation(
+            options.observationEpisodeId,
+            'route_changed',
+            clock.now()
+          );
+        const observationAdmission =
+          activeEpisodeId && route && evaluation?.decision === 'observing' && evaluation.score
+            ? await storage.admitObservation({
                 episodeId: activeEpisodeId,
-                decision: evaluation.decision,
+                route,
                 score: evaluation.score.score,
                 completeness: evaluation.score.completeness,
-                decisiveTriggerAtMs: evaluation.decisiveTriggerAtMs,
-                readyReevaluationAtMs:
-                  clock.now() + loaded.config.polling.observation_seconds * 1000,
-                readyExpiresAtMs: episodeExpiryAtMs(
+                evidenceFreshness: evaluation.evidence.length,
+                capacity: loaded.config.observation.max_active_episodes,
+                softRouteTarget: loaded.config.observation.soft_route_target,
+                nextEvaluationAtMs: staggeredEvaluationAtMs(clock.now(), event.tokenAddress, route),
+                expiresAtMs: episodeExpiryAtMs(
                   clock.now(),
-                  route!,
+                  route,
                   loaded.config.observation.expiry_minutes,
                   evaluation.evidence.some((item) => item.narrative)
                 ),
-                featureSnapshot: {
-                  features: evaluation.features,
-                  evidence: evaluation.evidence,
-                  creator_history: creatorScoreAdjustment
-                },
                 nowMs: clock.now()
-              });
-            else
-              await storage.rejectEpisodeSafetyGate({
-                episodeId: activeEpisodeId,
-                reason: 'observation_capacity_rejected',
-                snapshot: {
-                  features: evaluation.features,
-                  evidence: evaluation.evidence,
-                  creator_history: creatorScoreAdjustment
-                },
-                nowMs: clock.now()
-              });
-          await timeline.record('decision', {
-            route: evaluation?.route ?? null,
-            decision: evaluation?.decision ?? null,
-            score: evaluation?.score?.score ?? null,
-            observationOnly: evaluation?.observationOnly ?? false,
-            features: evaluation?.features ?? null,
-            evidence: evaluation?.evidence ?? [],
-            creatorHistory: creatorScoreAdjustment,
-            episodeAdmission: episode,
-            lazySafety: lazyGate ? { allowed: lazyGate.allowed, reason: lazyGate.reason } : null
-          });
-          if (
-            activeEpisodeId &&
-            evaluation?.score &&
-            evaluation.decision !== 'formal' &&
-            result.allowed
-          ) {
-            await storage.preserveUnsentEvaluationContext({
+              })
+            : null;
+        if (activeEpisodeId && route && evaluation?.decision === 'rejected')
+          await storage.rescheduleObservation(
+            activeEpisodeId,
+            staggeredEvaluationAtMs(clock.now(), event.tokenAddress, route),
+            clock.now()
+          );
+        if (activeEpisodeId && evaluation?.decision && evaluation.score)
+          if (observationAdmission?.admitted !== false)
+            await storage.recordEpisodeDecision({
               episodeId: activeEpisodeId,
-              rejectionReason: evaluation.decision ?? 'not_formal',
+              decision: evaluation.decision,
+              score: evaluation.score.score,
+              completeness: evaluation.score.completeness,
+              decisiveTriggerAtMs: evaluation.decisiveTriggerAtMs,
+              readyReevaluationAtMs: clock.now() + loaded.config.polling.observation_seconds * 1000,
+              readyExpiresAtMs: episodeExpiryAtMs(
+                clock.now(),
+                route!,
+                loaded.config.observation.expiry_minutes,
+                evaluation.evidence.some((item) => item.narrative)
+              ),
               featureSnapshot: {
                 features: evaluation.features,
                 evidence: evaluation.evidence,
                 creator_history: creatorScoreAdjustment
               },
-              configRevisionId: loaded.revisionId,
               nowMs: clock.now()
             });
-            await scheduleEvaluationTasks(storage, {
-              episodeId: activeEpisodeId,
-              signalId: null,
-              score: evaluation.score.score,
-              hardSafetyPassed: true,
-              formal: false,
-              narrative: evaluation.evidence.some((item) => item.narrative),
-              fromMs: clock.now(),
-              checkpointsMinutes: loaded.config.evaluation.checkpoints_minutes,
-              narrativeCheckpointsMinutes: loaded.config.evaluation.narrative_checkpoints_minutes,
-              maxUnsentTrackingMinutes: loaded.config.evaluation.unsent_tracking_minutes
-            });
-          }
-          if (activeEpisodeId && lazyGate && !lazyGate.allowed && !waitingForTraderBaseline) {
-            const lazySnapshot = {
-              features: evaluation?.features,
-              evidence: evaluation?.evidence,
-              lazy_safety: lazyGate,
-              creator_history: creatorScoreAdjustment
-            };
-            await storage.rejectEpisodeSafetyGate({
-              episodeId: activeEpisodeId,
-              reason: lazyGate.reason ?? 'lazy_safety_rejected',
-              snapshot: lazySnapshot,
-              nowMs: clock.now()
-            });
-            if (evaluation?.score) {
-              await storage.preserveUnsentEvaluationContext({
-                episodeId: activeEpisodeId,
-                rejectionReason: lazyGate.reason ?? 'lazy_safety_rejected',
-                featureSnapshot: lazySnapshot,
-                configRevisionId: loaded.revisionId,
-                nowMs: clock.now()
-              });
-              await scheduleEvaluationTasks(storage, {
-                episodeId: activeEpisodeId,
-                signalId: null,
-                score: evaluation.score.score,
-                hardSafetyPassed: true,
-                formal: false,
-                narrative: evaluation.evidence.some((item) => item.narrative),
-                fromMs: clock.now(),
-                checkpointsMinutes: loaded.config.evaluation.checkpoints_minutes,
-                narrativeCheckpointsMinutes: loaded.config.evaluation.narrative_checkpoints_minutes,
-                maxUnsentTrackingMinutes: loaded.config.evaluation.unsent_tracking_minutes
-              });
-            }
-          }
-          const market =
-            evaluation?.features?.priceUsd === undefined
-              ? undefined
-              : {
-                  priceUsd: evaluation.features.priceUsd,
-                  liquidityUsd: evaluation.features.liquidityUsd
-                };
-          let quote =
-            activeEpisodeId && evaluation?.decision === 'formal' && lazyGate?.allowed
-              ? await quotes.evaluate(event.tokenAddress, market)
-              : null;
-          const evaluateFinalFreshness = () =>
-            quote && result.assessedAtMs !== undefined && evaluation?.decisiveTriggerAtMs != null
-              ? finalFreshnessDecision({
-                  nowMs: clock.now(),
-                  securityAtMs: result.assessedAtMs,
-                  poolAtMs: result.assessedAtMs,
-                  quoteAtMs: quote.quotedAtMs,
-                  triggerAtMs: evaluation.decisiveTriggerAtMs,
-                  securityPoolMaxAgeMs: loaded.config.quote.security_pool_max_age_seconds * 1_000,
-                  quoteMaxAgeMs: loaded.config.quote.max_age_seconds * 1_000,
-                  decisiveWindowMs: route
-                    ? loaded.config.scoring.decisive_trigger_seconds[route] * 1_000
-                    : 0
-                })
-              : null;
-          let finalFreshness = evaluateFinalFreshness();
-          for (
-            let refreshCount = 0;
-            activeEpisodeId &&
-            quote &&
-            refreshCount < 3 &&
-            (finalFreshness === 'refresh_security_pool' || finalFreshness === 'refresh_quote');
-            refreshCount += 1
-          ) {
-            if (finalFreshness === 'refresh_security_pool')
-              result = await safety.process(event, { force: true, priority: 'formal' });
-            else quote = await quotes.evaluate(event.tokenAddress, market, { force: true });
-            if (!result.allowed) break;
-            finalFreshness = evaluateFinalFreshness();
-          }
-          const finalSafetyAllowed = result.allowed && lazyGate?.allowed === true;
-          let finalEvidenceAllowed =
-            routes.currentEvidence(event.tokenAddress).evidence.length >= 2;
-          const temporaryQuoteAdmission =
-            activeEpisodeId &&
-            route &&
-            evaluation?.score &&
-            quote?.temporaryCostFailure &&
-            finalSafetyAllowed &&
-            finalFreshness === 'fresh'
-              ? await storage.admitObservation({
-                  episodeId: activeEpisodeId,
-                  route,
-                  score: evaluation.score.score,
-                  completeness: evaluation.score.completeness,
-                  evidenceFreshness: evaluation.evidence.length,
-                  capacity: loaded.config.observation.max_active_episodes,
-                  softRouteTarget: loaded.config.observation.soft_route_target,
-                  nextEvaluationAtMs: staggeredEvaluationAtMs(
-                    clock.now(),
-                    event.tokenAddress,
-                    route
-                  ),
-                  expiresAtMs: episodeExpiryAtMs(
-                    clock.now(),
-                    route,
-                    loaded.config.observation.expiry_minutes,
-                    evaluation.evidence.some((item) => item.narrative)
-                  ),
-                  nowMs: clock.now()
-                })
-              : null;
-          if (quote && !quote.accepted) metrics.increment('quoteRejections');
-          if (quote && finalFreshness !== 'fresh') metrics.increment('staleCandidates');
-          if (activeEpisodeId && quote && !finalSafetyAllowed)
-            await storage.rejectEpisodeSafetyGate({
-              episodeId: activeEpisodeId,
-              reason: 'final_safety_refresh_rejected',
-              snapshot: {
-                features: evaluation?.features,
-                evidence: evaluation?.evidence,
-                lazy_safety: lazyGate,
-                creator_history: creatorScoreAdjustment
-              },
-              nowMs: clock.now()
-            });
-          else if (activeEpisodeId && quote && finalFreshness !== 'fresh')
-            await storage.rejectEpisodeSafetyGate({
-              episodeId: activeEpisodeId,
-              reason: `final_freshness_${finalFreshness ?? 'unverified'}`,
-              snapshot: {
-                features: evaluation?.features,
-                evidence: evaluation?.evidence,
-                quote_gate: quote
-              },
-              nowMs: clock.now()
-            });
-          if (activeEpisodeId && quote && temporaryQuoteAdmission?.admitted === false)
+          else
             await storage.rejectEpisodeSafetyGate({
               episodeId: activeEpisodeId,
               reason: 'observation_capacity_rejected',
               snapshot: {
-                features: evaluation?.features,
-                evidence: evaluation?.evidence,
-                quote_gate: quote
-              },
-              nowMs: clock.now()
-            });
-          else if (activeEpisodeId && quote && finalSafetyAllowed && finalFreshness === 'fresh')
-            await storage.recordEpisodeQuoteGate({
-              episodeId: activeEpisodeId,
-              quoteResult: quote,
-              accepted: quote.accepted,
-              temporaryCostFailure: quote.temporaryCostFailure,
-              nowMs: clock.now()
-            });
-          finalEvidenceAllowed = routes.currentEvidence(event.tokenAddress).evidence.length >= 2;
-          if (
-            activeEpisodeId &&
-            quote &&
-            quoteAllowsDelivery({
-              accepted: quote.accepted,
-              finalSafetyAllowed: finalSafetyAllowed && finalEvidenceAllowed,
-              finalFreshness,
-              observationAdmissionRejected: temporaryQuoteAdmission?.admitted === false
-            })
-          ) {
-            const outbox = await storage.createSignalOutbox({
-              signalId: randomUUID(),
-              episodeId: activeEpisodeId,
-              configRevisionId: loaded.revisionId,
-              quoteSnapshot: quote,
-              decision: {
-                correlationId: timeline.correlationId,
-                route,
-                tokenAddress: event.tokenAddress,
-                observedAtMs: event.observedAtMs,
-                decision: evaluation?.decision,
-                score: evaluation?.score,
-                completeness: evaluation?.score?.completeness,
-                decisiveTriggerAtMs: evaluation?.decisiveTriggerAtMs,
-                features: evaluation?.features,
-                evidence: evaluation?.evidence,
-                creatorHistory: creatorScoreAdjustment,
-                presentation: extractGmgnPresentation({
-                  infoResponse: result.info,
-                  discoveryPayload: event.payload,
-                  nowMs: clock.now()
-                })
-              },
-              nowMs: clock.now()
-            });
-            await timeline.record('outbox', { signalCreated: outbox === 'created' });
-            if (outbox === 'created') void deliverPendingOutbox();
-          } else if (
-            activeEpisodeId &&
-            quote &&
-            evaluation?.decision === 'formal' &&
-            evaluation.score &&
-            finalSafetyAllowed &&
-            finalEvidenceAllowed
-          ) {
-            await storage.preserveUnsentEvaluationContext({
-              episodeId: activeEpisodeId,
-              rejectionReason:
-                temporaryQuoteAdmission?.admitted === false
-                  ? 'observation_capacity_rejected'
-                  : !finalEvidenceAllowed
-                    ? 'final_evidence_invalidated'
-                    : finalFreshness !== 'fresh'
-                      ? `final_freshness_${finalFreshness ?? 'unverified'}`
-                      : quote.accepted
-                        ? 'outbox_not_created'
-                        : quote.temporaryCostFailure
-                          ? 'quote_cost_temporary'
-                          : 'quote_route_unavailable',
-              featureSnapshot: {
                 features: evaluation.features,
                 evidence: evaluation.evidence,
-                quote_gate: quote,
                 creator_history: creatorScoreAdjustment
               },
+              nowMs: clock.now()
+            });
+        await timeline.record('decision', {
+          route: evaluation?.route ?? null,
+          decision: evaluation?.decision ?? null,
+          score: evaluation?.score?.score ?? null,
+          observationOnly: evaluation?.observationOnly ?? false,
+          features: evaluation?.features ?? null,
+          evidence: evaluation?.evidence ?? [],
+          creatorHistory: creatorScoreAdjustment,
+          episodeAdmission: episode,
+          lazySafety: lazyGate ? { allowed: lazyGate.allowed, reason: lazyGate.reason } : null
+        });
+        if (
+          activeEpisodeId &&
+          evaluation?.score &&
+          evaluation.decision !== 'formal' &&
+          result.allowed
+        ) {
+          await storage.preserveUnsentEvaluationContext({
+            episodeId: activeEpisodeId,
+            rejectionReason: evaluation.decision ?? 'not_formal',
+            featureSnapshot: {
+              features: evaluation.features,
+              evidence: evaluation.evidence,
+              creator_history: creatorScoreAdjustment
+            },
+            configRevisionId: loaded.revisionId,
+            nowMs: clock.now()
+          });
+          await scheduleEvaluationTasks(storage, {
+            episodeId: activeEpisodeId,
+            signalId: null,
+            score: evaluation.score.score,
+            hardSafetyPassed: true,
+            formal: false,
+            narrative: evaluation.evidence.some((item) => item.narrative),
+            fromMs: clock.now(),
+            checkpointsMinutes: loaded.config.evaluation.checkpoints_minutes,
+            narrativeCheckpointsMinutes: loaded.config.evaluation.narrative_checkpoints_minutes,
+            maxUnsentTrackingMinutes: loaded.config.evaluation.unsent_tracking_minutes
+          });
+        }
+        if (activeEpisodeId && lazyGate && !lazyGate.allowed && !waitingForTraderBaseline) {
+          const lazySnapshot = {
+            features: evaluation?.features,
+            evidence: evaluation?.evidence,
+            lazy_safety: lazyGate,
+            creator_history: creatorScoreAdjustment
+          };
+          await storage.rejectEpisodeSafetyGate({
+            episodeId: activeEpisodeId,
+            reason: lazyGate.reason ?? 'lazy_safety_rejected',
+            snapshot: lazySnapshot,
+            nowMs: clock.now()
+          });
+          if (evaluation?.score) {
+            await storage.preserveUnsentEvaluationContext({
+              episodeId: activeEpisodeId,
+              rejectionReason: lazyGate.reason ?? 'lazy_safety_rejected',
+              featureSnapshot: lazySnapshot,
               configRevisionId: loaded.revisionId,
               nowMs: clock.now()
             });
@@ -692,86 +494,280 @@ const processCandidate = (
               maxUnsentTrackingMinutes: loaded.config.evaluation.unsent_tracking_minutes
             });
           }
-          const sentSignalId = activeEpisodeId
-            ? await storage.sentSignalIdForEpisode(activeEpisodeId)
-            : null;
-          if (sentSignalId && !result.allowed)
-            await telegramEdits.notifyMaterialChange({
-              episodeId: activeEpisodeId!,
-              signalId: sentSignalId,
-              reason: 'risk'
-            });
-          else if (sentSignalId && lazyGate && !lazyGate.allowed)
-            await telegramEdits.notifyMaterialChange({
-              episodeId: activeEpisodeId!,
-              signalId: sentSignalId,
-              reason: 'risk'
-            });
-          else if (sentSignalId && quote && !quote.accepted)
-            await telegramEdits.notifyMaterialChange({
-              episodeId: activeEpisodeId!,
-              signalId: sentSignalId,
-              reason: 'quote'
-            });
-          else if (sentSignalId && evaluation?.decision === 'formal')
-            await telegramEdits.notifyMaterialChange({
-              episodeId: activeEpisodeId!,
-              signalId: sentSignalId,
-              reason: 'evidence'
-            });
-          if (
-            result.allowed ||
-            [
-              'unmapped_signal_type',
-              'safety_source_unavailable',
-              'critical_field_missing',
-              'unmapped_security_alert',
-              'unmapped_security_flag'
-            ].includes(result.rejectionReason ?? '')
-          )
-            console.log(
-              JSON.stringify({
-                event: 'safety_assessed',
-                token: event.tokenAddress,
-                allowed: result.allowed,
-                reason: result.rejectionReason,
-                route,
-                decision: evaluation?.decision ?? null,
-                score: evaluation?.score?.score ?? null,
-                creator_base_score: creatorScoreAdjustment?.baseScore ?? null,
-                creator_history_penalty: creatorScoreAdjustment?.penalty ?? null,
-                creator_history_risk: creatorScoreAdjustment?.risk ?? null,
-                completeness: evaluation?.score?.completeness ?? null,
-                evidence_families: evaluation?.evidence.map((item) => item.family) ?? [],
-                route_features:
-                  evaluation?.features === null || evaluation?.features === undefined
-                    ? null
-                    : {
-                        age_ms: evaluation.features.ageMs,
-                        liquidity_usd: evaluation.features.liquidityUsd,
-                        first_launch_stage: evaluation.features.firstLaunchStage,
-                        valid_pool: evaluation.features.validPool,
-                        real_trading: evaluation.features.realTrading,
-                        growth_observed: evaluation.features.growthObserved,
-                        evidence_gate_passed: evaluation.features.evidenceGatePassed,
-                        dormant: evaluation.features.hasCompletedDormancy,
-                        revival_activity:
-                          evaluation.features.revivalVolumeQualified &&
-                          evaluation.features.revivalSwapsQualified,
-                        breakout: evaluation.features.structureBreakout,
-                        upward_trend: evaluation.features.upwardTrend,
-                        healthy_pullback: evaluation.features.healthyPullback,
-                        restart_volume: evaluation.features.restartVolume,
-                        vertical_pump: evaluation.features.verticalPump
-                      },
-                quote_accepted: quote?.accepted ?? null,
-                lazy_safety_allowed: lazyGate?.allowed ?? null,
-                observation_admitted: observationAdmission?.admitted ?? null,
-                episode
-              })
-            );
         }
-      )
+        const market =
+          evaluation?.features?.priceUsd === undefined
+            ? undefined
+            : {
+                priceUsd: evaluation.features.priceUsd,
+                liquidityUsd: evaluation.features.liquidityUsd
+              };
+        let quote =
+          activeEpisodeId && evaluation?.decision === 'formal' && lazyGate?.allowed
+            ? await quotes.evaluate(event.tokenAddress, market)
+            : null;
+        const evaluateFinalFreshness = () =>
+          quote && result.assessedAtMs !== undefined && evaluation?.decisiveTriggerAtMs != null
+            ? finalFreshnessDecision({
+                nowMs: clock.now(),
+                securityAtMs: result.assessedAtMs,
+                poolAtMs: result.assessedAtMs,
+                quoteAtMs: quote.quotedAtMs,
+                triggerAtMs: evaluation.decisiveTriggerAtMs,
+                securityPoolMaxAgeMs: loaded.config.quote.security_pool_max_age_seconds * 1_000,
+                quoteMaxAgeMs: loaded.config.quote.max_age_seconds * 1_000,
+                decisiveWindowMs: route
+                  ? loaded.config.scoring.decisive_trigger_seconds[route] * 1_000
+                  : 0
+              })
+            : null;
+        let finalFreshness = evaluateFinalFreshness();
+        for (
+          let refreshCount = 0;
+          activeEpisodeId &&
+          quote &&
+          refreshCount < 3 &&
+          (finalFreshness === 'refresh_security_pool' || finalFreshness === 'refresh_quote');
+          refreshCount += 1
+        ) {
+          if (finalFreshness === 'refresh_security_pool')
+            result = await safety.process(event, { force: true, priority: 'formal' });
+          else quote = await quotes.evaluate(event.tokenAddress, market, { force: true });
+          if (!result.allowed) break;
+          finalFreshness = evaluateFinalFreshness();
+        }
+        const finalSafetyAllowed = result.allowed && lazyGate?.allowed === true;
+        let finalEvidenceAllowed = routes.currentEvidence(event.tokenAddress).evidence.length >= 2;
+        const temporaryQuoteAdmission =
+          activeEpisodeId &&
+          route &&
+          evaluation?.score &&
+          quote?.temporaryCostFailure &&
+          finalSafetyAllowed &&
+          finalFreshness === 'fresh'
+            ? await storage.admitObservation({
+                episodeId: activeEpisodeId,
+                route,
+                score: evaluation.score.score,
+                completeness: evaluation.score.completeness,
+                evidenceFreshness: evaluation.evidence.length,
+                capacity: loaded.config.observation.max_active_episodes,
+                softRouteTarget: loaded.config.observation.soft_route_target,
+                nextEvaluationAtMs: staggeredEvaluationAtMs(clock.now(), event.tokenAddress, route),
+                expiresAtMs: episodeExpiryAtMs(
+                  clock.now(),
+                  route,
+                  loaded.config.observation.expiry_minutes,
+                  evaluation.evidence.some((item) => item.narrative)
+                ),
+                nowMs: clock.now()
+              })
+            : null;
+        if (quote && !quote.accepted) metrics.increment('quoteRejections');
+        if (quote && finalFreshness !== 'fresh') metrics.increment('staleCandidates');
+        if (activeEpisodeId && quote && !finalSafetyAllowed)
+          await storage.rejectEpisodeSafetyGate({
+            episodeId: activeEpisodeId,
+            reason: 'final_safety_refresh_rejected',
+            snapshot: {
+              features: evaluation?.features,
+              evidence: evaluation?.evidence,
+              lazy_safety: lazyGate,
+              creator_history: creatorScoreAdjustment
+            },
+            nowMs: clock.now()
+          });
+        else if (activeEpisodeId && quote && finalFreshness !== 'fresh')
+          await storage.rejectEpisodeSafetyGate({
+            episodeId: activeEpisodeId,
+            reason: `final_freshness_${finalFreshness ?? 'unverified'}`,
+            snapshot: {
+              features: evaluation?.features,
+              evidence: evaluation?.evidence,
+              quote_gate: quote
+            },
+            nowMs: clock.now()
+          });
+        if (activeEpisodeId && quote && temporaryQuoteAdmission?.admitted === false)
+          await storage.rejectEpisodeSafetyGate({
+            episodeId: activeEpisodeId,
+            reason: 'observation_capacity_rejected',
+            snapshot: {
+              features: evaluation?.features,
+              evidence: evaluation?.evidence,
+              quote_gate: quote
+            },
+            nowMs: clock.now()
+          });
+        else if (activeEpisodeId && quote && finalSafetyAllowed && finalFreshness === 'fresh')
+          await storage.recordEpisodeQuoteGate({
+            episodeId: activeEpisodeId,
+            quoteResult: quote,
+            accepted: quote.accepted,
+            temporaryCostFailure: quote.temporaryCostFailure,
+            nowMs: clock.now()
+          });
+        finalEvidenceAllowed = routes.currentEvidence(event.tokenAddress).evidence.length >= 2;
+        if (
+          activeEpisodeId &&
+          quote &&
+          quoteAllowsDelivery({
+            accepted: quote.accepted,
+            finalSafetyAllowed: finalSafetyAllowed && finalEvidenceAllowed,
+            finalFreshness,
+            observationAdmissionRejected: temporaryQuoteAdmission?.admitted === false
+          })
+        ) {
+          const outbox = await storage.createSignalOutbox({
+            signalId: randomUUID(),
+            episodeId: activeEpisodeId,
+            configRevisionId: loaded.revisionId,
+            quoteSnapshot: quote,
+            decision: {
+              correlationId: timeline.correlationId,
+              route,
+              tokenAddress: event.tokenAddress,
+              observedAtMs: event.observedAtMs,
+              decision: evaluation?.decision,
+              score: evaluation?.score,
+              completeness: evaluation?.score?.completeness,
+              decisiveTriggerAtMs: evaluation?.decisiveTriggerAtMs,
+              features: evaluation?.features,
+              evidence: evaluation?.evidence,
+              creatorHistory: creatorScoreAdjustment,
+              presentation: extractGmgnPresentation({
+                infoResponse: result.info,
+                discoveryPayload: event.payload,
+                nowMs: clock.now()
+              })
+            },
+            nowMs: clock.now()
+          });
+          await timeline.record('outbox', { signalCreated: outbox === 'created' });
+          if (outbox === 'created') void deliverPendingOutbox();
+        } else if (
+          activeEpisodeId &&
+          quote &&
+          evaluation?.decision === 'formal' &&
+          evaluation.score &&
+          finalSafetyAllowed &&
+          finalEvidenceAllowed
+        ) {
+          await storage.preserveUnsentEvaluationContext({
+            episodeId: activeEpisodeId,
+            rejectionReason:
+              temporaryQuoteAdmission?.admitted === false
+                ? 'observation_capacity_rejected'
+                : !finalEvidenceAllowed
+                  ? 'final_evidence_invalidated'
+                  : finalFreshness !== 'fresh'
+                    ? `final_freshness_${finalFreshness ?? 'unverified'}`
+                    : quote.accepted
+                      ? 'outbox_not_created'
+                      : quote.temporaryCostFailure
+                        ? 'quote_cost_temporary'
+                        : 'quote_route_unavailable',
+            featureSnapshot: {
+              features: evaluation.features,
+              evidence: evaluation.evidence,
+              quote_gate: quote,
+              creator_history: creatorScoreAdjustment
+            },
+            configRevisionId: loaded.revisionId,
+            nowMs: clock.now()
+          });
+          await scheduleEvaluationTasks(storage, {
+            episodeId: activeEpisodeId,
+            signalId: null,
+            score: evaluation.score.score,
+            hardSafetyPassed: true,
+            formal: false,
+            narrative: evaluation.evidence.some((item) => item.narrative),
+            fromMs: clock.now(),
+            checkpointsMinutes: loaded.config.evaluation.checkpoints_minutes,
+            narrativeCheckpointsMinutes: loaded.config.evaluation.narrative_checkpoints_minutes,
+            maxUnsentTrackingMinutes: loaded.config.evaluation.unsent_tracking_minutes
+          });
+        }
+        const sentSignalId = activeEpisodeId
+          ? await storage.sentSignalIdForEpisode(activeEpisodeId)
+          : null;
+        if (sentSignalId && !result.allowed)
+          await telegramEdits.notifyMaterialChange({
+            episodeId: activeEpisodeId!,
+            signalId: sentSignalId,
+            reason: 'risk'
+          });
+        else if (sentSignalId && lazyGate && !lazyGate.allowed)
+          await telegramEdits.notifyMaterialChange({
+            episodeId: activeEpisodeId!,
+            signalId: sentSignalId,
+            reason: 'risk'
+          });
+        else if (sentSignalId && quote && !quote.accepted)
+          await telegramEdits.notifyMaterialChange({
+            episodeId: activeEpisodeId!,
+            signalId: sentSignalId,
+            reason: 'quote'
+          });
+        else if (sentSignalId && evaluation?.decision === 'formal')
+          await telegramEdits.notifyMaterialChange({
+            episodeId: activeEpisodeId!,
+            signalId: sentSignalId,
+            reason: 'evidence'
+          });
+        if (
+          result.allowed ||
+          [
+            'unmapped_signal_type',
+            'safety_source_unavailable',
+            'critical_field_missing',
+            'unmapped_security_alert',
+            'unmapped_security_flag'
+          ].includes(result.rejectionReason ?? '')
+        )
+          console.log(
+            JSON.stringify({
+              event: 'safety_assessed',
+              token: event.tokenAddress,
+              allowed: result.allowed,
+              reason: result.rejectionReason,
+              route,
+              decision: evaluation?.decision ?? null,
+              score: evaluation?.score?.score ?? null,
+              creator_base_score: creatorScoreAdjustment?.baseScore ?? null,
+              creator_history_penalty: creatorScoreAdjustment?.penalty ?? null,
+              creator_history_risk: creatorScoreAdjustment?.risk ?? null,
+              completeness: evaluation?.score?.completeness ?? null,
+              evidence_families: evaluation?.evidence.map((item) => item.family) ?? [],
+              route_features:
+                evaluation?.features === null || evaluation?.features === undefined
+                  ? null
+                  : {
+                      age_ms: evaluation.features.ageMs,
+                      liquidity_usd: evaluation.features.liquidityUsd,
+                      first_launch_stage: evaluation.features.firstLaunchStage,
+                      valid_pool: evaluation.features.validPool,
+                      real_trading: evaluation.features.realTrading,
+                      growth_observed: evaluation.features.growthObserved,
+                      evidence_gate_passed: evaluation.features.evidenceGatePassed,
+                      dormant: evaluation.features.hasCompletedDormancy,
+                      revival_activity:
+                        evaluation.features.revivalVolumeQualified &&
+                        evaluation.features.revivalSwapsQualified,
+                      breakout: evaluation.features.structureBreakout,
+                      upward_trend: evaluation.features.upwardTrend,
+                      healthy_pullback: evaluation.features.healthyPullback,
+                      restart_volume: evaluation.features.restartVolume,
+                      vertical_pump: evaluation.features.verticalPump
+                    },
+              quote_accepted: quote?.accepted ?? null,
+              lazy_safety_allowed: lazyGate?.allowed ?? null,
+              observation_admitted: observationAdmission?.admitted ?? null,
+              episode
+            })
+          );
+      }
     ).catch(async (error: unknown) => {
       await timeline.record('decision', {
         decision: 'processing_error',
@@ -1069,6 +1065,8 @@ const prewatchTimer = setInterval(() => {
             researchOnly: true
           });
         } catch (error) {
+          if (!(error instanceof GmgnError && error.kind === 'rate_limit'))
+            await storage.removeCandidateWatch(watch.tokenAddress);
           console.error(
             JSON.stringify({
               event: 'prewatch_failed',
@@ -1174,16 +1172,16 @@ async function refreshPendingSignalMarket(
   const route = requiredString(decision.route, 'route');
   const triggerAtMs = requiredNumber(decision.decisiveTriggerAtMs, 'decisiveTriggerAtMs');
   if (route !== 'new_launch' && route !== 'revival' && route !== 'continuation') {
-    await storage.recordDeliveryFailure(signal.id, 'pre_send_unknown_route', nowMs);
+    await storage.recordPreSendCancellation(signal.id, 'pre_send_unknown_route', nowMs);
     return null;
   }
   if (nowMs - triggerAtMs > loaded.config.scoring.decisive_trigger_seconds[route] * 1_000) {
-    await storage.recordDeliveryFailure(signal.id, 'pre_send_decisive_trigger_expired', nowMs);
+    await storage.recordPreSendCancellation(signal.id, 'pre_send_decisive_trigger_expired', nowMs);
     return null;
   }
 
   if (!(await revalidateUnknownDelivery(signal))) {
-    await storage.recordDeliveryFailure(
+    await storage.recordPreSendCancellation(
       signal.id,
       'pre_send_route_or_safety_invalidated',
       clock.now()
@@ -1216,7 +1214,7 @@ async function refreshPendingSignalMarket(
       { force: true }
     );
     if (!asRecord(quoteSnapshot).accepted) {
-      await storage.recordDeliveryFailure(signal.id, 'pre_send_quote_rejected', clock.now());
+      await storage.recordPreSendCancellation(signal.id, 'pre_send_quote_rejected', clock.now());
       return null;
     }
     info = await candidateApi.token('/v1/token/info', tokenAddress, 'formal');
@@ -1236,7 +1234,7 @@ async function refreshPendingSignalMarket(
         { force: true }
       );
       if (!asRecord(quoteSnapshot).accepted) {
-        await storage.recordDeliveryFailure(signal.id, 'pre_send_quote_rejected', clock.now());
+        await storage.recordPreSendCancellation(signal.id, 'pre_send_quote_rejected', clock.now());
         return null;
       }
       info = await candidateApi.token('/v1/token/info', tokenAddress, 'formal');
@@ -1259,7 +1257,7 @@ async function refreshPendingSignalMarket(
     quoteMaxAgeMs: loaded.config.quote.max_age_seconds * 1000
   });
   if (rejection) {
-    await storage.recordDeliveryFailure(signal.id, rejection, clock.now());
+    await storage.recordPreSendCancellation(signal.id, rejection, clock.now());
     return null;
   }
   return storage.updatePendingSignalMarket(signal.id, presentation, quoteSnapshot, fetchedAtMs);
@@ -1308,7 +1306,10 @@ async function runDueOutcomeTasks(): Promise<void> {
         storage,
         {
           candles: ({ fromMs, toMs }) =>
-            fetchMarketPath(candidateApi, task.tokenAddress, fromMs, toMs)
+            fetchMarketPath(candidateApi, task.tokenAddress, fromMs, toMs, {
+              now: () => clock.now(),
+              maxRepairRequests: loaded.config.evaluation.path_max_gap_requests ?? 2
+            })
         },
         provider ?? {
           buy: () => Promise.reject(new Error('unsent samples have no entry Quote')),
@@ -1365,7 +1366,12 @@ async function runDueOutcomeTasks(): Promise<void> {
           horizonAtMs: task.horizonAtMs ?? task.targetAtMs
         },
         targetMultiples:
-          task.evaluationPolicy?.target_multiples ?? loaded.config.evaluation.target_multiples
+          task.evaluationPolicy?.target_multiples ?? loaded.config.evaluation.target_multiples,
+        repairPolicy: {
+          attempt: task.pathCaptureAttempts + 1,
+          maxAttempts: loaded.config.evaluation.path_max_capture_attempts ?? 3,
+          retryDelayMs: (loaded.config.evaluation.path_retry_seconds ?? 30) * 1000
+        }
       });
       await storage.recordOperationTrace({
         correlationId: task.signalId ?? `episode:${task.episodeId}`,

@@ -47,7 +47,10 @@ void test('combines runtime and durable health metrics', async () => {
       quoteRejections: 4,
       activeEpisodes: 1,
       signals: 1,
-      deliveryFailures: 1,
+      deliveryFailures: 0,
+      preSendCancellations: 0,
+      preparationFailures: 0,
+      deliveryUnknown: 1,
       dueTaskBacklog: 1,
       deduplicationRate: 0.25
     });

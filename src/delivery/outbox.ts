@@ -74,7 +74,8 @@ export class OutboxDeliveryService {
       await this.options.storage.recordDeliveryFailure(
         signal.id,
         `preparation_failed: ${deliveryErrorText(error)}`,
-        failedAtMs
+        failedAtMs,
+        'preparation_failed'
       );
       return 'failed';
     }

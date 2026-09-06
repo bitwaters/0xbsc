@@ -411,3 +411,188 @@ void test('restart recovers orphan READY once, and expires an old deadline witho
     storage.close();
   }
 });
+
+void test('pre-send cancellation and preparation failures are separate from Telegram transport failures', async () => {
+  const storage = await Storage.open(':memory:');
+  try {
+    await seed(storage);
+    await storage.recordEpisodeDecision({
+      episodeId: 'ep',
+      decision: 'formal',
+      score: 90,
+      completeness: 1,
+      decisiveTriggerAtMs: 1000,
+      featureSnapshot: { features: { priceUsd: 1 } },
+      nowMs: 1000
+    });
+    assert.equal(
+      await storage.createSignalOutbox({
+        signalId: 'sig',
+        episodeId: 'ep',
+        configRevisionId: 'cfg',
+        quoteSnapshot: {},
+        decision: {},
+        nowMs: 1000
+      }),
+      'created'
+    );
+    await storage.recordPreSendCancellation('sig', 'pre_send_buy_pressure_lost', 2000);
+    const row = storage.db
+      .prepare(
+        'SELECT delivery_state AS state,delivery_failure_kind AS kind,last_delivery_error AS error,delivery_attempted_at_ms AS attempted FROM signals WHERE id=?'
+      )
+      .get('sig');
+    assert.deepEqual(row, {
+      state: 'SEND_FAILED',
+      kind: 'pre_send_cancelled',
+      error: 'pre_send_buy_pressure_lost',
+      attempted: null
+    });
+    const metrics = await storage.durableMetricCounts(2000);
+    assert.equal(metrics.deliveryFailures, 0);
+    assert.equal(metrics.preSendCancellations, 1);
+    assert.equal((await storage.pendingOutboxSignals(999_000)).length, 0);
+    await storage.recordDeliveryFailure('sig', 'must not replace history', 3000);
+    assert.deepEqual(
+      storage.db
+        .prepare(
+          'SELECT delivery_state AS state,delivery_failure_kind AS kind,last_delivery_error AS error,delivery_attempted_at_ms AS attempted FROM signals WHERE id=?'
+        )
+        .get('sig'),
+      row
+    );
+  } finally {
+    storage.close();
+  }
+});
+
+void test('historical path repair is bounded and preserves coordinates and original result', async () => {
+  const storage = await Storage.open(':memory:');
+  try {
+    await seed(storage);
+    await storage.recordEpisodeDecision({
+      episodeId: 'ep',
+      decision: 'observing',
+      score: 75,
+      completeness: 1,
+      decisiveTriggerAtMs: 1000,
+      featureSnapshot: { features: { priceUsd: 1 } },
+      nowMs: 1000
+    });
+    await storage.scheduleResultTasks({
+      episodeId: 'ep',
+      signalId: null,
+      score: 75,
+      hardSafetyPassed: true,
+      formal: false,
+      narrative: false,
+      fromMs: 1000,
+      checkpointsMinutes: [1],
+      narrativeCheckpointsMinutes: []
+    });
+    const original = JSON.stringify({
+      candles: [],
+      exitQuotes: [],
+      outcome: { path: { coverage: 'incomplete' } }
+    });
+    storage.db.prepare("UPDATE price_samples SET status='COMPLETE',data_json=?").run(original);
+    assert.equal(await storage.requeueIncompletePaths(100_000), 1);
+    assert.equal(await storage.requeueIncompletePaths(100_000), 0);
+    const task = (await storage.dueOutcomeTasks(100_000))[0]!;
+    assert.equal(task.entryAtMs, 1000);
+    assert.equal(task.targetAtMs, 61_000);
+    assert.equal(task.entryMarketPrice, '1');
+    await storage.recordOutcomeCheckpoint({
+      taskId: task.taskId,
+      episodeId: 'ep',
+      signalId: null,
+      checkpointMinutes: 1,
+      requestedAtMs: 100_000,
+      completedAtMs: 101_000,
+      data: { candles: [] }
+    });
+    await storage.attachOutcomeEvaluation({
+      taskId: task.taskId,
+      episodeId: 'ep',
+      signalId: null,
+      checkpointMinutes: 1,
+      outcome: { path: { coverage: 'incomplete' } },
+      nowMs: 101_000,
+      retryAtMs: 131_000
+    });
+    assert.equal((await storage.dueOutcomeTasks(130_000)).length, 0);
+    assert.equal((await storage.dueOutcomeTasks(131_000))[0]?.pathCaptureAttempts, 1);
+    await storage.attachOutcomeEvaluation({
+      taskId: task.taskId,
+      episodeId: 'ep',
+      signalId: null,
+      checkpointMinutes: 1,
+      outcome: { path: { coverage: 'incomplete' } },
+      nowMs: 140_000
+    });
+    assert.equal(await storage.requeueIncompletePaths(150_000), 0);
+    assert.equal(
+      (
+        storage.db
+          .prepare('SELECT initial_checkpoint_json AS original FROM price_samples')
+          .get() as { original: string }
+      ).original,
+      original
+    );
+  } finally {
+    storage.close();
+  }
+});
+
+void test('upgrade classifies old failures without changing their history or replaying outbox', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'delivery-migration-'));
+  const migrations = join(dir, 'migrations');
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(migrations);
+  const source = new URL('../../src/storage/migrations/', import.meta.url);
+  for (const name of await readdir(source))
+    if (name < '013')
+      await writeFile(join(migrations, name), await readFile(new URL(name, source)));
+  let storage = await Storage.open(join(dir, 'db'), migrations);
+  try {
+    await seed(storage);
+    const insert = storage.db
+      .prepare(`INSERT INTO signals(id,episode_id,config_revision_id,delivery_state,quote_snapshot_json,decision_json,last_delivery_error,delivery_attempted_at_ms,created_at_ms,updated_at_ms)
+      VALUES(?,?,'cfg','SEND_FAILED','{}','{}',?,1234,1,2)`);
+    for (const id of ['cancel', 'prepare', 'transport']) {
+      storage.db
+        .prepare(
+          `INSERT INTO episodes(id,chain,token_address,route,state,config_revision_id,created_at_ms,updated_at_ms,ended_at_ms)
+        VALUES(?,'bsc','0xq','new_launch','SEND_FAILED','cfg',1,2,2)`
+        )
+        .run(id);
+    }
+    insert.run('cancel', 'cancel', 'pre_send_buy_pressure_lost');
+    insert.run('prepare', 'prepare', 'preparation_failed: invalid snapshot');
+    insert.run('transport', 'transport', 'Telegram request failed');
+    const before = storage.db
+      .prepare(
+        'SELECT id,delivery_state,last_delivery_error,delivery_attempted_at_ms,updated_at_ms FROM signals ORDER BY id'
+      )
+      .all();
+    storage.close();
+    storage = await Storage.open(join(dir, 'db'));
+    assert.deepEqual(
+      storage.db
+        .prepare(
+          'SELECT id,delivery_state,last_delivery_error,delivery_attempted_at_ms,updated_at_ms FROM signals ORDER BY id'
+        )
+        .all(),
+      before
+    );
+    const metrics = await storage.durableMetricCounts(2000);
+    assert.equal(metrics.deliveryFailures, 1);
+    assert.equal(metrics.preparationFailures, 1);
+    assert.equal(metrics.preSendCancellations, 1);
+    assert.equal((await storage.pendingOutboxSignals(2000)).length, 0);
+    assert.deepEqual(storage.db.pragma('foreign_key_check'), []);
+  } finally {
+    storage.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});

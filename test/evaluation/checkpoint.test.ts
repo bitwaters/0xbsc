@@ -174,3 +174,72 @@ void test('a quote requested on time but completed late is not a timely executab
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+void test('path repairs retain original executable quotes, frozen coordinates and initial evidence', async () => {
+  const { storage, directory } = await setup();
+  try {
+    let nowMs = 61_000,
+      calls = 0;
+    const quotes = {
+      buy: () => Promise.reject(new Error('unused')),
+      sell: () => {
+        calls++;
+        return Promise.resolve({
+          inputUsd: '10',
+          outputUsd: '11',
+          configuredSlippagePercent: '1',
+          routeAvailable: true,
+          direction: 'sell' as const,
+          costSemanticsVersion: 'gmgn-bsc-quote-2026-09-03-v1' as const
+        });
+      }
+    };
+    const make = (timeMs: number) => ({
+      timeMs,
+      intervalMs: 30_000,
+      completed: true,
+      high: '2',
+      low: '1',
+      close: '1.5'
+    });
+    const input = {
+      taskId: 1,
+      episodeId: 'ep-checkpoint',
+      signalId: 'sig-checkpoint',
+      formal: true,
+      checkpointMinutes: 1,
+      entryAtMs: 1000,
+      targetAtMs: 61_000,
+      now: () => nowMs
+    };
+    const first = await captureOutcomeCheckpoint(
+      storage,
+      { candles: () => Promise.resolve([make(0)]) },
+      quotes,
+      input
+    );
+    nowMs = 121_000;
+    const second = await captureOutcomeCheckpoint(
+      storage,
+      { candles: () => Promise.resolve([make(30_000), make(60_000)]) },
+      quotes,
+      input
+    );
+    assert.equal(calls, 1);
+    assert.deepEqual(second.exitQuotes, first.exitQuotes);
+    assert.equal(second.exitLate, first.exitLate);
+    assert.equal(second.candles.length, 3);
+    const row = storage.db
+      .prepare(
+        'SELECT path_capture_attempts AS attempts,initial_checkpoint_json AS original,entry_at_ms AS entry,target_at_ms AS target FROM price_samples WHERE id=1'
+      )
+      .get() as { attempts: number; original: string; entry: number; target: number };
+    assert.equal(row.attempts, 2);
+    assert.deepEqual((JSON.parse(row.original) as { candles: unknown }).candles, first.candles);
+    assert.equal(row.entry, 1000);
+    assert.equal(row.target, 61_000);
+  } finally {
+    storage.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});

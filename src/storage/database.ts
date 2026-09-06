@@ -78,6 +78,7 @@ export interface DueOutcomeTask {
   entryAtMs: number;
   targetAtMs: number;
   qualityVersion: string;
+  pathCaptureAttempts: number;
   horizonAtMs: number;
   evaluationPolicy: {
     target_multiples?: number[];
@@ -118,6 +119,9 @@ export interface DurableMetricCounts {
   activeEpisodes: number;
   signals: number;
   deliveryFailures: number;
+  preSendCancellations: number;
+  preparationFailures: number;
+  deliveryUnknown: number;
   dueTaskBacklog: number;
 }
 
@@ -1029,7 +1033,16 @@ export class Storage {
     });
   }
 
-  recordDeliveryFailure(signalId: string, error: string, nowMs: number): Promise<void> {
+  recordPreSendCancellation(signalId: string, reason: string, nowMs: number): Promise<void> {
+    return this.recordDeliveryFailure(signalId, reason, nowMs, 'pre_send_cancelled');
+  }
+
+  recordDeliveryFailure(
+    signalId: string,
+    error: string,
+    nowMs: number,
+    kind: 'pre_send_cancelled' | 'preparation_failed' | 'telegram_failed' = 'telegram_failed'
+  ): Promise<void> {
     return this.transaction(() => {
       const signal = this.db
         .prepare('SELECT episode_id AS episodeId FROM signals WHERE id = ?')
@@ -1038,10 +1051,11 @@ export class Storage {
       const updated = this.db
         .prepare(
           `UPDATE signals SET delivery_state = 'SEND_FAILED', last_delivery_error = ?,
-             delivery_attempted_at_ms = ?, updated_at_ms = ?
+             delivery_attempted_at_ms = CASE WHEN ? = 'telegram_failed' THEN ? ELSE delivery_attempted_at_ms END,
+             delivery_failure_kind = ?, updated_at_ms = ?
            WHERE id = ? AND delivery_state IN ('PENDING', 'DELIVERY_UNKNOWN')`
         )
-        .run(error, nowMs, nowMs, signalId);
+        .run(error, kind, nowMs, kind, nowMs, signalId);
       if (updated.changes !== 1) return;
       this.db
         .prepare(
@@ -1319,7 +1333,7 @@ export class Storage {
                     episode.token_address AS tokenAddress, sample.task_kind AS taskKind,
                     sample.due_at_ms AS dueAtMs, sample.entry_at_ms AS entryAtMs,
                     sample.target_at_ms AS targetAtMs, sample.entry_market_price AS frozenPrice,
-                    sample.quality_version AS qualityVersion, sample.horizon_at_ms AS horizonAtMs, sample.evaluation_policy_json AS evaluationPolicyJson, episode.feature_snapshot_json AS episodeSnapshot,
+                    sample.quality_version AS qualityVersion, sample.path_capture_attempts AS pathCaptureAttempts, sample.horizon_at_ms AS horizonAtMs, sample.evaluation_policy_json AS evaluationPolicyJson, episode.feature_snapshot_json AS episodeSnapshot,
                     signal.decision_json AS signalDecision
              FROM price_samples AS sample JOIN episodes AS episode ON episode.id = sample.episode_id
              LEFT JOIN signals AS signal ON signal.id = sample.signal_id
@@ -1345,6 +1359,7 @@ export class Storage {
             entryAtMs: candidate.entryAtMs,
             targetAtMs: candidate.targetAtMs,
             qualityVersion: candidate.qualityVersion,
+            pathCaptureAttempts: candidate.pathCaptureAttempts,
             horizonAtMs: candidate.horizonAtMs,
             evaluationPolicy: candidate.evaluationPolicyJson
               ? (JSON.parse(candidate.evaluationPolicyJson) as DueOutcomeTask['evaluationPolicy'])
@@ -1421,6 +1436,37 @@ export class Storage {
     );
   }
 
+  readOutcomeCheckpoint(
+    taskId: number,
+    episodeId: string,
+    signalId: string | null
+  ): Promise<unknown> {
+    return this.write(() => {
+      const row = this.db
+        .prepare(
+          'SELECT data_json AS data FROM price_samples WHERE id=? AND episode_id=? AND signal_id IS ?'
+        )
+        .get(taskId, episodeId, signalId) as { data: string | null } | undefined;
+      return row?.data ? (JSON.parse(row.data) as unknown) : null;
+    });
+  }
+
+  /** One bounded repair of recent pre-upgrade results, without touching legacy entries. */
+  requeueIncompletePaths(nowMs: number): Promise<number> {
+    return this.write(
+      () =>
+        this.db
+          .prepare(
+            `UPDATE price_samples SET
+      initial_checkpoint_json=COALESCE(initial_checkpoint_json,data_json),status='PENDING',next_attempt_at_ms=?
+      WHERE id IN (SELECT id FROM price_samples WHERE quality_version='path-v2' AND status='COMPLETE'
+        AND path_capture_attempts=0 AND entry_market_price IS NOT NULL AND target_at_ms>=?
+        AND json_extract(data_json,'$.outcome.path.coverage')='incomplete' ORDER BY target_at_ms DESC LIMIT 100)`
+          )
+          .run(nowMs, nowMs - 24 * 3600000).changes
+    );
+  }
+
   recordOutcomeCheckpoint(input: {
     taskId: number;
     episodeId: string;
@@ -1434,7 +1480,8 @@ export class Storage {
       this.db
         .prepare(
           `UPDATE price_samples SET requested_at_ms = ?, completed_at_ms = ?,
-             data_json = ?, updated_at_ms = ?
+             initial_checkpoint_json=COALESCE(initial_checkpoint_json,data_json),
+             path_capture_attempts=path_capture_attempts+1, data_json = ?, updated_at_ms = ?
            WHERE id = ? AND episode_id = ? AND signal_id IS ? AND task_kind = ? AND status = 'PENDING'`
         )
         .run(
@@ -1457,6 +1504,7 @@ export class Storage {
     checkpointMinutes: number;
     outcome: unknown;
     nowMs: number;
+    retryAtMs?: number | null;
   }): Promise<void> {
     return this.write(() => {
       const row = this.db
@@ -1473,9 +1521,11 @@ export class Storage {
       const existing = row.data === null ? {} : (JSON.parse(row.data) as Record<string, unknown>);
       this.db
         .prepare(
-          "UPDATE price_samples SET status = 'COMPLETE', data_json = ?, updated_at_ms = ? WHERE id = ? AND episode_id = ? AND signal_id IS ? AND task_kind = ? AND status = 'PENDING'"
+          "UPDATE price_samples SET status = ?, next_attempt_at_ms = ?, data_json = ?, updated_at_ms = ? WHERE id = ? AND episode_id = ? AND signal_id IS ? AND task_kind = ? AND status = 'PENDING'"
         )
         .run(
+          input.retryAtMs == null ? 'COMPLETE' : 'PENDING',
+          input.retryAtMs ?? null,
           serializeJson({ ...existing, outcome: input.outcome }),
           input.nowMs,
           input.taskId,
@@ -1686,10 +1736,29 @@ export class Storage {
       deliveryFailures: (
         this.db
           .prepare(
-            "SELECT COUNT(*) AS count FROM signals WHERE delivery_state IN ('SEND_FAILED', 'DELIVERY_UNKNOWN')"
+            "SELECT COUNT(*) AS count FROM signals WHERE delivery_state='SEND_FAILED' AND delivery_failure_kind='telegram_failed'"
           )
           .get() as { count: number }
       ).count,
+      preSendCancellations: (
+        this.db
+          .prepare(
+            "SELECT count(*) AS n FROM signals WHERE delivery_failure_kind='pre_send_cancelled'"
+          )
+          .get() as { n: number }
+      ).n,
+      preparationFailures: (
+        this.db
+          .prepare(
+            "SELECT count(*) AS n FROM signals WHERE delivery_failure_kind='preparation_failed'"
+          )
+          .get() as { n: number }
+      ).n,
+      deliveryUnknown: (
+        this.db
+          .prepare("SELECT count(*) AS n FROM signals WHERE delivery_state='DELIVERY_UNKNOWN'")
+          .get() as { n: number }
+      ).n,
       dueTaskBacklog: (
         this.db
           .prepare(
@@ -1853,6 +1922,12 @@ export class Storage {
         );
     });
   }
+  removeCandidateWatch(tokenAddress: string): Promise<void> {
+    return this.write(() => {
+      this.db.prepare('DELETE FROM candidate_watches WHERE token_address=?').run(tokenAddress);
+    });
+  }
+
   dueCandidateWatches(nowMs: number, intervalMs: number): Promise<NormalizedEvent[]> {
     return this.write(() => {
       this.db.prepare('DELETE FROM candidate_watches WHERE expires_at_ms<=?').run(nowMs);
