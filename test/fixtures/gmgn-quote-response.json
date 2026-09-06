@@ -1,0 +1,14 @@
+{
+  "code": 0,
+  "data": {
+    "input_amount": "13893200000000000",
+    "output_amount": "86415433406157045046",
+    "min_output_amount": "77773890065541340541",
+    "slippage": 10,
+    "tx": {
+      "amount_in_usd": "10",
+      "amount_out_usd": "9.92546496321935310393975",
+      "gas_limit": "350000"
+    }
+  }
+}

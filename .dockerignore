@@ -1,0 +1,12 @@
+**
+!Dockerfile
+!.dockerignore
+!package.json
+!package-lock.json
+!tsconfig.json
+!eslint.config.js
+!config.example.yaml
+!src/
+!src/**
+!test/
+!test/**

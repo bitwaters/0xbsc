@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run ci
+      - name: Validate specifications
+        run: npx --yes --package=@fission-ai/openspec@1.8.0 openspec validate build-bsc-meme-signal-bot --strict
+      - name: Reject committed private credentials
+        run: |
+          if git grep -lEI '(gh[pousr]_[A-Za-z0-9]{30,}|[0-9]{8,}:[A-Za-z0-9_-]{30,}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----)'; then
+            echo 'Potential credentials detected; inspect the listed files.'
+            exit 1
+          fi
+          if git ls-files | grep -E '(^|/)(config\.yaml|\.env(\..*)?|id_rsa|id_ed25519)$|^(artifacts|scripts|data|backups)/|\.(db|sqlite3?|pem|key)(-|$)' | grep -v '^openspec/config.yaml$'; then
+            echo 'Local or sensitive files must not be committed.'
+            exit 1
+          fi

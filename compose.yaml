@@ -1,0 +1,15 @@
+services:
+  signal-bot:
+    build:
+      context: .
+    image: bsc-meme-signal-bot:local
+    restart: unless-stopped
+    read_only: true
+    volumes:
+      - ./config.yaml:/home/signalbot/.config/gmgn-signal-bot/config.yaml:ro
+      - signal-bot-data:/var/lib/gmgn-signal-bot
+    tmpfs:
+      - /tmp:mode=1777
+
+volumes:
+  signal-bot-data:

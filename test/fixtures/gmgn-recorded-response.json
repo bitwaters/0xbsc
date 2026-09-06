@@ -1,0 +1,8 @@
+{
+  "code": 0,
+  "msg": "ok",
+  "data": {
+    "token": "0xREDACTED",
+    "items": [{ "rank": 1, "symbol": "TEST" }]
+  }
+}
