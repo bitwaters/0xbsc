@@ -1,12 +1,12 @@
 ## Purpose
 
-规定所有运行秘密、轮询周期、阈值、评分、观察、报价、Telegram、存储和评估参数如何集中在一份经过完整校验的 YAML 中，并以最少组件安全部署。
+规定策略参数由 YAML 管理，运行凭据可由同目录受保护的 .env 文件覆盖，合并后完整校验并以最少组件部署。
 
 ## ADDED Requirements
 
 ### Requirement: Runtime configuration has one source of truth
 
-生产进程 SHALL 只读取 `~/.config/gmgn-signal-bot/config.yaml`。所有可调阈值、周期、排名变化步长、开关、路线权重、创建者历史发币数/开放率阈值及最多 5 分的扣分上限、Signal 分组、GMGN API Key、公开 Quote 钱包、Telegram Token、Chat 和允许用户、SQLite 路径及保留策略 MUST 位于该文件，不得分散到 `.env`、源码或其他运行配置。
+生产进程 SHALL 读取 `~/.config/gmgn-signal-bot/config.yaml` 管理全部策略与存储参数。按部署要求，同目录可选的 `.env` SHALL 只覆盖 RUNTIME_MODE、GMGN_API_KEY、GMGN_QUOTE_WALLET、TELEGRAM_BOT_TOKEN、TELEGRAM_CHAT_IDS 和 TELEGRAM_ALLOWED_USER_IDS 六个字段，优先于 YAML；空文件或缺失文件保持原 YAML 行为。非空 `.env` MUST 完整填写六个字段，未知字段或缺失值拒绝启动。程序不得把进程环境当作隐式配置来源。SEA 上两个文件 MUST 位于 `/www/wwwroot/0xbsc/`，由 Compose 只读挂载，不写入镜像或容器环境。
 
 #### Scenario: Required value is missing or invalid
 
@@ -24,7 +24,7 @@
 
 ### Requirement: Secrets and configuration history are protected
 
-配置文件权限 MUST 为 `600`、目录权限 MUST 为 `700`，日志 MUST 脱敏 GMGN API Key 与 Telegram Token。每个 Episode 和信号 SHALL 保存配置版本与 SHA-256；配置历史不得保存秘密。
+进程读取的配置文件权限 MUST 为 `600`、其容器内目录权限 MUST 为 `700`，日志 MUST 脱敏 GMGN API Key 与 Telegram Token。每个 Episode 和信号 SHALL 保存配置版本与 SHA-256；配置历史不得保存秘密。
 
 #### Scenario: API error includes an authenticated request context
 
@@ -39,3 +39,8 @@
 
 - **WHEN** 容器在持久卷保持不变的情况下重启
 - **THEN** 系统恢复事件去重、活动 Episode、Outbox、信号和结果任务，并使用重新校验后的唯一配置继续运行
+
+#### Scenario: Operator configures an env file
+
+- **WHEN** 操作者在项目目录填写 .env 并重新创建容器
+- **THEN** 程序以只读文件合并凭据和模式，保持其余 YAML 参数不变；错误和配置历史不输出凭据

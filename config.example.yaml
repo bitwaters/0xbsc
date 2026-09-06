@@ -1,5 +1,5 @@
 # Copy to ~/.config/gmgn-signal-bot/config.yaml and replace all placeholders.
-# This is the only runtime configuration source. Do not use .env files.
+# Strategy settings live here. Optional sibling .env overrides credentials and runtime mode.
 runtime:
   chain: bsc
   mode: dry_run

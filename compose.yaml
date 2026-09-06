@@ -6,7 +6,18 @@ services:
     restart: unless-stopped
     read_only: true
     volumes:
-      - ./config.yaml:/home/signalbot/.config/gmgn-signal-bot/config.yaml:ro
+      - type: bind
+        source: ./config.yaml
+        target: /home/signalbot/.config/gmgn-signal-bot/config.yaml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./.env
+        target: /home/signalbot/.config/gmgn-signal-bot/.env
+        read_only: true
+        bind:
+          create_host_path: false
       - signal-bot-data:/var/lib/gmgn-signal-bot
     tmpfs:
       - /tmp:mode=1777

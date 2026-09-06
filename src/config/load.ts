@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
+import { parseEnv } from 'node:util';
 import { parse } from 'yaml';
 import { z } from 'zod';
 import type { RuntimeConfig } from './types.js';
@@ -268,10 +269,71 @@ export async function loadRuntimeConfig(path: string): Promise<LoadedConfig> {
     throw new ConfigError(
       parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')
     );
+  const env = await loadCredentialFile(join(dirname(path), '.env'));
+  if (env) {
+    parsed.data.runtime.mode = env.RUNTIME_MODE;
+    parsed.data.gmgn.api_key = env.GMGN_API_KEY;
+    parsed.data.gmgn.quote_wallet = env.GMGN_QUOTE_WALLET;
+    parsed.data.telegram.bot_token = env.TELEGRAM_BOT_TOKEN;
+    parsed.data.telegram.chat_ids = env.TELEGRAM_CHAT_IDS;
+    parsed.data.telegram.allowed_user_ids = env.TELEGRAM_ALLOWED_USER_IDS;
+  }
+  if ([parsed.data.gmgn.api_key, parsed.data.telegram.bot_token].includes('REPLACE_ME'))
+    throw new ConfigError('GMGN and Telegram credentials must be configured before startup');
   assertCrossFieldRules(parsed.data);
   const sanitizedSnapshot = redactSecrets(parsed.data) as Record<string, unknown>;
   const revisionId = createHash('sha256').update(JSON.stringify(sanitizedSnapshot)).digest('hex');
   return { config: parsed.data, revisionId, sanitizedSnapshot };
+}
+
+const credentialValue = z
+  .string()
+  .trim()
+  .min(1)
+  .refine((value) => value !== 'REPLACE_ME');
+const chatIds = z
+  .string()
+  .transform((value) => value.split(',').map((id) => id.trim()))
+  .pipe(z.array(z.string().regex(/^-?[1-9]\d*$/)).min(1));
+const userIds = z
+  .string()
+  .transform((value) => value.split(',').map((id) => id.trim()))
+  .pipe(z.array(z.string().regex(/^[1-9]\d*$/)).min(1));
+const credentialFileSchema = z
+  .object({
+    RUNTIME_MODE: z.enum(['dry_run', 'live']),
+    GMGN_API_KEY: credentialValue,
+    GMGN_QUOTE_WALLET: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+    TELEGRAM_BOT_TOKEN: credentialValue,
+    TELEGRAM_CHAT_IDS: chatIds,
+    TELEGRAM_ALLOWED_USER_IDS: userIds
+  })
+  .strict();
+
+async function loadCredentialFile(path: string) {
+  try {
+    await assertSecureConfigPath(path);
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return;
+    throw error;
+  }
+  const text = await readFile(path, 'utf8');
+  let values: ReturnType<typeof parseEnv>;
+  try {
+    values = parseEnv(text);
+  } catch {
+    throw new ConfigError('Cannot parse .env credential file');
+  }
+  // An empty file preserves existing YAML-only deployments.
+  if (Object.keys(values).length === 0) return;
+  const parsed = credentialFileSchema.safeParse(values);
+  if (!parsed.success) {
+    const fields = [
+      ...new Set(parsed.error.issues.map((issue) => issue.path[0] ?? 'unknown field'))
+    ];
+    throw new ConfigError(`Invalid or missing .env fields: ${fields.join(', ')}`);
+  }
+  return parsed.data;
 }
 
 export async function assertSecureConfigPath(path: string): Promise<void> {

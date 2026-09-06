@@ -6,7 +6,7 @@ loads signing keys or places trades.
 
 ## Validation status
 
-The example configuration starts in `dry_run` mode. V2 filtering is a shadow experiment
+The YAML example starts in `dry_run` mode; the optional `.env.example` selects `live` once all credentials are filled in. V2 filtering is a shadow experiment
 and does not produce additional formal notifications. Historical outcome evaluation uses
 price-path target multiples and downside barriers, with time-based checkpoints as supporting data.
 
@@ -34,15 +34,19 @@ with the pinned `@fission-ai/openspec` CLI.
 - `decimal.js`: preserve quote, token and Wei precision.
 
 Development dependencies provide TypeScript compilation, Node test execution through `tsx`,
-and formatting/linting. Copy `config.example.yaml` to the required runtime path
-`~/.config/gmgn-signal-bot/config.yaml`, replace placeholders, then set the directory to
-`0700` and the file to `0600`.
+and formatting/linting. For direct Node execution, put `config.yaml` and optional `.env` in
+`~/.config/gmgn-signal-bot/`, with directory permissions `0700` and file permissions `0600`.
 
 ## Container operation
 
-Copy `config.example.yaml` to `config.yaml`, replace placeholders, and keep it out of Git.
-The Compose definition mounts that file read-only and stores SQLite data in the named
-`signal-bot-data` volume:
+Copy `config.example.yaml` to `config.yaml` and `.env.example` to `.env` in the project directory.
+Fill in the six fields in `.env`; the credentials and runtime mode override their YAML counterparts.
+Strategy settings stay in YAML. An empty `.env` retains YAML-only configuration. Blank required
+fields or placeholder credentials prevent startup before any API requests or database writes.
+
+Both files must be readable by the container account (UID/GID 999) with permissions `0600`.
+Compose mounts them read-only as files, without adding secrets to the image or container environment.
+SQLite data uses the named `signal-bot-data` volume:
 
 ```sh
 docker compose up -d --build
@@ -56,7 +60,7 @@ signing, swap, or order configuration.
 Stop the container before a consistent file-level backup, then copy the SQLite database from the
 named volume. Restore by stopping the container, replacing `signal-bot.db` in that volume with
 the backup, and starting the container again. Keep the matching `config.yaml` revision with each
-backup; configuration history in SQLite is secret-free.
+backup, together with its protected `.env`; configuration history in SQLite is secret-free.
 
 ### Upgrade and rollback
 
@@ -68,6 +72,7 @@ applied migration files.
 ### Logs and secret rotation
 
 Use the container runtime's log retention/rotation policy; application logs are JSON and redact
-configured GMGN and Telegram secrets. Rotate a GMGN key or Telegram bot token by updating only
-`config.yaml`, retaining `0600` permissions, then restart the container. Never place secrets in
-environment variables, Compose files, or source control.
+configured GMGN and Telegram secrets. Rotate a GMGN key or Telegram bot token in the mounted
+`.env` file (or YAML for YAML-only operation), retain `0600` permissions, then restart the container.
+Never put actual secrets in Compose definitions, images, or source control. See [operations](docs/operations.md)
+for the local → GitHub → server deployment workflow.

@@ -145,3 +145,7 @@ Traders 在访问网络前查缓存；发现与报价共享短期 Gas。结果�
 实际只读验收进一步复现：混合负载最高 15 权重/秒、隔离 Quote 最高 6 权重/秒仍收到 RATE_LIMIT_EXCEEDED。以配置 `gmgn.rate_limit.quote_min_interval_ms` 在同一调度器中约束 Quote 请求间隔，当前验证值 600ms，保持总权重 20/14 不变；该值是实测运行参数，不宣称官方套餐将 Quote 限定为每秒两次。保存服务端 request ID 和 reset，后续可用这些证据核实公开权重表之外的限制。
 
 后续只读验证在 600ms Quote 间隔下仍收到 `IP rate limit exceeded`。该配置尚不能证明已解决上游 IP 限制；生产验收未通过，具体限制范围仍待确认。
+
+## 2026-09-06 SEA 配置流程修订
+
+按用户指定，SEA 的 config.yaml 与 .env 同处项目目录 /www/wwwroot/0xbsc，实际文件不进入 Git。策略保留在 YAML，六个运行字段由同目录 .env 覆盖并完整校验；文件只读挂载，不注入容器环境。修改源码和模板必须在本地完成，经 GitHub 推送、服务器拉取后部署。此次 SEA 使用全新数据卷，不迁移本机历史库。此要求替代早期仅允许单 YAML 的部署约束。

@@ -138,3 +138,86 @@ void test('configuration revisions retain non-secret token-named settings', asyn
     await rm(changed.directory, { recursive: true, force: true });
   }
 });
+
+const validEnv = `RUNTIME_MODE=live
+GMGN_API_KEY='env-secret#$literal'
+GMGN_QUOTE_WALLET=0x0000000000000000000000000000000000000002
+TELEGRAM_BOT_TOKEN=env-bot-secret
+TELEGRAM_CHAT_IDS=-100123, -100456
+TELEGRAM_ALLOWED_USER_IDS=123,456
+`;
+
+void test('credential file overrides YAML, preserves literal secrets and redacts merged history', async () => {
+  const fixture = await configFile();
+  try {
+    await writeFile(join(fixture.directory, '.env'), validEnv, { mode: 0o600 });
+    const loaded = await loadRuntimeConfig(fixture.path);
+    assert.equal(loaded.config.runtime.mode, 'live');
+    assert.equal(loaded.config.gmgn.api_key, 'env-secret#$literal');
+    assert.equal(loaded.config.gmgn.quote_wallet, '0x0000000000000000000000000000000000000002');
+    assert.equal(loaded.config.telegram.bot_token, 'env-bot-secret');
+    assert.deepEqual(loaded.config.telegram.chat_ids, ['-100123', '-100456']);
+    assert.deepEqual(loaded.config.telegram.allowed_user_ids, ['123', '456']);
+    assert.doesNotMatch(JSON.stringify(loaded.sanitizedSnapshot), /env-secret|env-bot-secret/);
+    await writeFile(
+      join(fixture.directory, '.env'),
+      validEnv.replace('env-bot-secret', 'rotated-secret')
+    );
+    assert.equal((await loadRuntimeConfig(fixture.path)).revisionId, loaded.revisionId);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+void test('incomplete credential files fail closed without exposing invalid values', async () => {
+  const fixture = await configFile();
+  try {
+    for (const contents of [
+      validEnv.replace("GMGN_API_KEY='env-secret#$literal'", 'GMGN_API_KEY='),
+      validEnv.replace('TELEGRAM_CHAT_IDS=-100123, -100456', 'TELEGRAM_CHAT_IDS=-100123,'),
+      validEnv.replace('TELEGRAM_ALLOWED_USER_IDS=123,456', 'TELEGRAM_ALLOWED_USER_IDS=-123'),
+      validEnv.replace('RUNTIME_MODE=live', 'RUNTIME_MODE=secret-in-invalid-field'),
+      `${validEnv}\nUNSUPPORTED_FIELD=secret-in-invalid-field`,
+      validEnv.replace('0x0000000000000000000000000000000000000002', 'secret-in-invalid-field')
+    ]) {
+      await writeFile(join(fixture.directory, '.env'), contents, { mode: 0o600 });
+      await assert.rejects(loadRuntimeConfig(fixture.path), (error: unknown) => {
+        assert.ok(error instanceof ConfigError);
+        assert.match(error.message, /Invalid or missing .env fields/);
+        assert.doesNotMatch(error.message, /secret-in-invalid-field|env-secret|env-bot-secret/);
+        return true;
+      });
+    }
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+void test('credential file requires restricted permissions and an empty file preserves YAML', async () => {
+  const fixture = await configFile();
+  try {
+    const envPath = join(fixture.directory, '.env');
+    await writeFile(envPath, validEnv, { mode: 0o644 });
+    await chmod(envPath, 0o644);
+    await assert.rejects(loadRuntimeConfig(fixture.path), /0600/);
+    await chmod(envPath, 0o600);
+    await writeFile(envPath, '# use existing YAML credentials\n');
+    assert.equal((await loadRuntimeConfig(fixture.path)).config.gmgn.api_key, 'a-secret');
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+void test('unconfigured YAML placeholders refuse startup before opening the database', async () => {
+  const fixture = await configFile(validYaml.replace('a-secret', 'REPLACE_ME'));
+  try {
+    await assert.rejects(loadRuntimeConfig(fixture.path), /must be configured before startup/);
+    await writeFile(join(fixture.directory, '.env'), validEnv, { mode: 0o600 });
+    assert.equal(
+      (await loadRuntimeConfig(fixture.path)).config.gmgn.api_key,
+      'env-secret#$literal'
+    );
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
