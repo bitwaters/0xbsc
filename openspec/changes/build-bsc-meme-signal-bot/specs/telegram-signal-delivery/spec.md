@@ -15,7 +15,7 @@
 
 ### Requirement: Delivery refreshes displayed market data immediately before rendering
 
-每次初始发送、延迟发送或恢复发送在渲染 Telegram 卡片前，系统 SHALL 通过统一 GMGN 调度器刷新 Info，并把价格、MC、流动性、持有人数、浏览热度和刷新时间原子写回 Outbox 决策。若刷新发现价格或流动性达到配置的实质变化阈值，或原 Quote 已超过五秒，系统 MUST 有界重做 Quote；触发已经陈旧或新 Quote 不再通过时不得发送。后续定时编辑 SHALL 刷新同一组展示数据，但不得覆盖已确认信号的不可变入场价格。
+每次初始发送、延迟发送或恢复发送在渲染 Telegram 卡片前，系统 SHALL 通过统一 GMGN 调度器刷新 Info，并把价格、MC、流动性、持有人数、浏览热度和刷新时间原子写回 Outbox 决策。若刷新发现价格或流动性达到配置的实质变化阈值，或原 Quote 已超过五秒，系统 MUST 有界重做 Quote；触发已经陈旧或新 Quote 不再通过时不得发送。确认发送后 SHALL 冻结原始卡片，不得继续编辑价格、评分、依据或原始时间。
 
 #### Scenario: Market moves while Quote and Telegram work are pending
 
@@ -33,7 +33,7 @@
 
 ### Requirement: Callback actions are authorized
 
-兼容旧消息的管理回调 MUST 仅接受合并配置中允许的 Chat 和管理员用户；空管理员名单 MUST 拒绝全部管理回调，但不得阻止正式推送和公共链接访问；每个回调 SHALL 验证消息或信号关联后再执行动作。刷新状态 MUST 通过同一个 GMGN 加权调度器且不得绕过安全和新鲜度规则；标记已买只保存用户注释，MUST NOT 发起交易；停止跟踪只停止该消息后续自动编辑，后台标准质量采样继续执行；删除消息只调用 Telegram 删除并标记消息不可再编辑，MUST NOT 删除数据库样本。GMGN 详情和复制合约不得产生交易副作用。回调状态变更 MUST 幂等，同一个 Telegram update 被长轮询重复取得时不得重复产生副作用。
+兼容旧消息的管理回调 MUST 仅接受合并配置中允许的 Chat 和管理员用户；空管理员名单 MUST 拒绝全部管理回调，但不得阻止正式推送和公共链接访问；每个回调 SHALL 验证消息或信号关联后再执行动作。旧刷新回调 SHALL 告知原始信号已冻结并引导到 GMGN，不修改原消息；标记已买只保存用户注释，MUST NOT 发起交易；停止跟踪只停止该消息后续自动编辑，后台标准质量采样继续执行；删除消息只调用 Telegram 删除并标记消息不可再编辑，MUST NOT 删除数据库样本。GMGN 详情和复制合约不得产生交易副作用。回调状态变更 MUST 幂等，同一个 Telegram update 被长轮询重复取得时不得重复产生副作用。
 
 #### Scenario: Unauthorized user presses a button
 
@@ -48,7 +48,7 @@
 #### Scenario: User marks a signal as bought
 
 - **WHEN** 授权用户点击“标记已买”
-- **THEN** 系统只记录用户标记和时间并更新消息，不调用 GMGN Swap、签名或任何交易接口
+- **THEN** 系统只记录用户标记和时间，不更新原消息，不调用 GMGN Swap、签名或任何交易接口
 
 #### Scenario: User stops message tracking
 
@@ -69,14 +69,19 @@ Telegram 请求在可能已送达但响应未知时 MUST 标记为 `DELIVERY_UNK
 - **WHEN** Telegram 通过 HTTP 状态或 API `error_code` 返回 429
 - **THEN** 系统保留 `PENDING` 状态并按 `retry_after` 延迟，不得将其永久标记为 `SEND_FAILED`
 
-### Requirement: Later evidence updates rather than duplicates a sent signal
+### Requirement: Original signal cards are immutable after sending
 
-同一路线状态内的新证据、风险变化或结果进度 SHALL 更新原 Telegram 消息，不得创建第二条正式信号；只有 Episode 结束并满足路线重置条件后才可产生新消息。普通正式信号默认在 1、5、15、30、60 分钟更新，强叙事信号增加 120、240 分钟更新；安全、流动性或 Quote 明显恶化时 SHALL 不等待检查点立即更新风险状态。
+系统 SHALL 在每次发送请求前持久保存完整消息正文、按钮、判定、Quote 和请求时间；确认成功后关联该次快照。投递未知重试 MUST 分别保留尝试快照，不覆盖前次证据。后续新证据、风险及结果 SHALL 仅保存在后台跟踪数据和独立报告，不改写原卡片，不产生重复正式信号。每个原卡 SHALL 标注推送参考价及固定快照时间。
 
-#### Scenario: Supporting KOL evidence arrives after send
+#### Scenario: Market changes after confirmation
 
-- **WHEN** 已发送 Episode 收到仍有效的新 KOL 证据
-- **THEN** 系统更新原消息的支持证据和更新时间，不创建重复信号
+- **WHEN** 价格、流动性、风险或支持证据在发送后变化
+- **THEN** 原卡片及发送快照保持不变，冻结入场价和标准结果采样继续有效
+
+#### Scenario: Upgrade encounters old edit tasks
+
+- **WHEN** 升级时存在待执行的定时或即时卡片编辑任务
+- **THEN** 系统取消这些编辑任务，保留已完成编辑历史及所有质量采样，不为缺少原始正文的历史卡片制造快照
 
 ### Requirement: Every qualifying signal is delivered without a count quota
 
@@ -89,16 +94,16 @@ Telegram 请求在可能已送达但响应未知时 MUST 标记为 `DELIVERY_UNK
 
 ### Requirement: Formal signal messages are not auto-deleted
 
-正式信号 SHALL 保留并通过编辑反映后续状态；只有测试、确认重复、失败消息或授权用户明确删除的消息可以删除。
+正式信号 SHALL 保留原始发送快照；只有测试、确认重复、失败消息或授权用户明确删除的消息可以删除。
 
 #### Scenario: Formal tracking reaches its last checkpoint
 
 - **WHEN** 正式信号完成所有结果检查点
-- **THEN** 系统更新最终结果但不自动删除 Telegram 消息或数据库样本
+- **THEN** 系统保存后台最终结果，不编辑或自动删除 Telegram 原消息，不删除数据库样本
 
-### Requirement: Every send and sent-signal risk display use current evidence
+### Requirement: Every send uses current evidence and later risk tracking stays separate
 
-系统 MUST 在实际发送前重新验证路线、基础安全、买卖方向、结构失效位及触发和 Quote 新鲜度。已 SENT 信号的风险更新 SHALL 独立于活动 Episode 查询，并展示检查时间和实际通过、失败或未知状态；仅刷新价格不得把安全状态显示成刚刚全部复核通过。
+系统 MUST 在实际发送前重新验证路线、基础安全、买卖方向、结构失效位及触发和 Quote 新鲜度。已 SENT 信号的后台风险记录 SHALL 独立于活动 Episode 查询，并记录检查时间和实际通过、失败或未知状态；仅刷新价格不得把安全状态显示成刚刚全部复核通过。
 
 #### Scenario: Buy pressure disappears while a message is pending
 
@@ -108,7 +113,7 @@ Telegram 请求在可能已送达但响应未知时 MUST 标记为 `DELIVERY_UNK
 #### Scenario: Risk appears after the Episode ended
 
 - **WHEN** 已 SENT 代币后续检查发现风险，而原 Episode 已终止
-- **THEN** 系统仍能更新该信号风险状态；重复相同风险不得无限创建编辑任务
+- **THEN** 系统仍能记录该信号风险状态，且不创建原卡编辑任务
 
 #### Scenario: Public links and administrator actions are separate
 

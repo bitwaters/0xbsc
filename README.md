@@ -80,3 +80,16 @@ configured GMGN and Telegram secrets. Rotate a GMGN key or Telegram bot token in
 `.env` file (or YAML for YAML-only operation), retain `0600` permissions, then restart the container.
 Never put actual secrets in Compose definitions, images, or source control. See [operations](docs/operations.md)
 for the local → GitHub → server deployment workflow.
+
+## Immutable signal cards
+
+Signals show the pre-send reference price and a fixed UTC snapshot time. After sending,
+the original card is never automatically edited. Price-path evaluation and internal risk
+tracking continue independently. Exact delivery payloads and decision/quote snapshots are
+recorded before each request; confirmed delivery links its specific immutable attempt.
+Old refresh callbacks explain that the card is frozen and direct users to GMGN.
+
+Migration 014 cancels only pending Telegram edits, including edits from previous releases.
+It preserves completed edit history and all outcome tasks. Previously edited cards have
+no trustworthy original full payload, so their snapshot link remains empty; the stored
+frozen entry price is preserved and no historical card is reconstructed or resent.

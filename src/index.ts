@@ -28,7 +28,6 @@ import { OutboxDeliveryService } from './delivery/outbox.js';
 import type { PendingOutboxSignal } from './storage/database.js';
 import { extractGmgnPresentation } from './delivery/gmgn-presentation.js';
 import { buttonLabelsFromConfig, formatRichSignal, inlineKeyboard } from './delivery/template.js';
-import { TelegramEditService } from './delivery/edits.js';
 import { scheduleEvaluationTasks } from './evaluation/tasks.js';
 import { capturePostConfirmationEntryQuotes } from './evaluation/entry.js';
 import { GmgnQuoteProvider } from './quote/gmgn-provider.js';
@@ -689,33 +688,6 @@ const processCandidate = (
             maxUnsentTrackingMinutes: loaded.config.evaluation.unsent_tracking_minutes
           });
         }
-        const sentSignalId = activeEpisodeId
-          ? await storage.sentSignalIdForEpisode(activeEpisodeId)
-          : null;
-        if (sentSignalId && !result.allowed)
-          await telegramEdits.notifyMaterialChange({
-            episodeId: activeEpisodeId!,
-            signalId: sentSignalId,
-            reason: 'risk'
-          });
-        else if (sentSignalId && lazyGate && !lazyGate.allowed)
-          await telegramEdits.notifyMaterialChange({
-            episodeId: activeEpisodeId!,
-            signalId: sentSignalId,
-            reason: 'risk'
-          });
-        else if (sentSignalId && quote && !quote.accepted)
-          await telegramEdits.notifyMaterialChange({
-            episodeId: activeEpisodeId!,
-            signalId: sentSignalId,
-            reason: 'quote'
-          });
-        else if (sentSignalId && evaluation?.decision === 'formal')
-          await telegramEdits.notifyMaterialChange({
-            episodeId: activeEpisodeId!,
-            signalId: sentSignalId,
-            reason: 'evidence'
-          });
         if (
           result.allowed ||
           [
@@ -779,70 +751,6 @@ const processCandidate = (
   );
 };
 const telegram = new TelegramClient({ botToken: loaded.config.telegram.bot_token });
-const telegramEdits = new TelegramEditService({
-  storage,
-  telegram,
-  prepareBeforeEdit: async (edit) => {
-    const tokenAddress = requiredString(asRecord(edit.decision).tokenAddress, 'tokenAddress');
-    const fetchedAtMs = clock.now();
-    const event = await storage.latestEventForSignal(edit.signalId);
-    let riskStatus = { status: 'unknown', reason: 'missing_event', checkedAtMs: clock.now() };
-    let info: unknown;
-    if (event) {
-      try {
-        const check = await safety.process(
-          { ...event, payload: {} },
-          { force: true, priority: 'evaluation' }
-        );
-        riskStatus = {
-          status: check.allowed ? 'passed' : 'failed',
-          reason: check.rejectionReason ?? 'basic_security_only',
-          checkedAtMs: clock.now()
-        };
-        info = check.info;
-      } catch {
-        riskStatus = {
-          status: 'unknown',
-          reason: 'safety_source_unavailable',
-          checkedAtMs: clock.now()
-        };
-      }
-    }
-    if (info === undefined)
-      info = await candidateApi.token('/v1/token/info', tokenAddress, 'evaluation');
-    await storage.recordSentRisk(
-      tokenAddress,
-      riskStatus.status as 'passed' | 'failed' | 'unknown',
-      riskStatus.reason,
-      clock.now()
-    );
-    const presentation = extractGmgnPresentation({ infoResponse: info, nowMs: fetchedAtMs });
-    await storage.updateSignalPresentation(edit.signalId, presentation, fetchedAtMs, false);
-    return {
-      ...edit,
-      decision: { ...asRecord(edit.decision), presentation, riskStatus }
-    };
-  },
-  render: (edit) =>
-    renderOutboxSignal({
-      id: edit.signalId,
-      episodeId: edit.episodeId,
-      deliveryState: 'PENDING',
-      retryCount: 0,
-      quoteSnapshot: edit.quoteSnapshot,
-      decision: edit.decision
-    }),
-  now: () => clock.now(),
-  onError: (edit, error) =>
-    console.error(
-      JSON.stringify({
-        event: 'telegram_edit_failed',
-        signal_id: edit.signalId,
-        task_kind: edit.taskKind,
-        error: error instanceof Error ? error.message : 'unknown error'
-      })
-    )
-});
 const outboxDelivery = new OutboxDeliveryService({
   storage,
   telegram,
@@ -890,17 +798,7 @@ const callbackHandler = new TelegramCallbackHandler({
   telegram,
   allowedChatIds: loaded.config.telegram.chat_ids,
   allowedUserIds: loaded.config.telegram.allowed_user_ids,
-  now: () => clock.now(),
-  onRefresh: async (signalId) => {
-    const context = await storage.signalRefreshContext(signalId);
-    if (!context) return;
-    const info = await candidateApi.token('/v1/token/info', context.tokenAddress, 'evaluation');
-    await storage.updateSignalPresentation(
-      signalId,
-      extractGmgnPresentation({ infoResponse: info, nowMs: clock.now() }),
-      clock.now()
-    );
-  }
+  now: () => clock.now()
 });
 const telegramPoller = new TelegramLongPoller({ storage, telegram, handler: callbackHandler });
 let outboxDeliveryRunning = false;
@@ -930,24 +828,6 @@ await discovery.start();
 void deliverPendingOutbox();
 const outboxDeliveryTimer = setInterval(() => {
   void deliverPendingOutbox();
-}, 250);
-let telegramEditRunning = false;
-const telegramEditTimer = setInterval(() => {
-  if (loaded.config.runtime.mode !== 'live' || telegramEditRunning) return;
-  telegramEditRunning = true;
-  void telegramEdits
-    .runDue()
-    .catch((error: unknown) =>
-      console.error(
-        JSON.stringify({
-          event: 'telegram_edit_failed',
-          error: error instanceof Error ? error.message : 'unknown error'
-        })
-      )
-    )
-    .finally(() => {
-      telegramEditRunning = false;
-    });
 }, 250);
 let telegramPollRunning = false;
 const telegramPollTimer = setInterval(() => {
@@ -1136,7 +1016,6 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const)
     clearInterval(dueTimer);
     clearInterval(telegramPollTimer);
     clearInterval(outboxDeliveryTimer);
-    clearInterval(telegramEditTimer);
     clearInterval(outcomeTimer);
     clearInterval(metricTimer);
     clearInterval(healthTimer);

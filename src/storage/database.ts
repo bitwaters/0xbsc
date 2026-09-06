@@ -1,5 +1,5 @@
 import type { ApiObservation } from '../gmgn/client.js';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -48,17 +48,6 @@ export interface PendingOutboxSignal {
   retryCount: number;
   quoteSnapshot: unknown;
   decision: unknown;
-}
-
-export interface DueTelegramEdit {
-  taskId: number;
-  signalId: string;
-  episodeId: string;
-  chatId: string;
-  messageId: number;
-  decision: unknown;
-  quoteSnapshot: unknown;
-  taskKind: string;
 }
 
 export interface EntryQuoteForExit {
@@ -858,54 +847,6 @@ export class Storage {
     });
   }
 
-  signalRefreshContext(
-    signalId: string
-  ): Promise<{ tokenAddress: string; decision: unknown } | null> {
-    return this.write(() => {
-      const row = this.db
-        .prepare(
-          `SELECT episode.token_address AS tokenAddress, signal.decision_json AS decision
-           FROM signals AS signal JOIN episodes AS episode ON episode.id = signal.episode_id
-           WHERE signal.id = ? AND signal.delivery_state = 'SENT'`
-        )
-        .get(signalId) as { tokenAddress: string; decision: string } | undefined;
-      return row
-        ? { tokenAddress: row.tokenAddress, decision: JSON.parse(row.decision) as unknown }
-        : null;
-    });
-  }
-
-  updateSignalPresentation(
-    signalId: string,
-    presentation: unknown,
-    nowMs: number,
-    enqueueEdit = true
-  ): Promise<boolean> {
-    return this.transaction(() => {
-      const row = this.db
-        .prepare(
-          "SELECT episode_id AS episodeId, decision_json AS decision FROM signals WHERE id = ? AND delivery_state = 'SENT'"
-        )
-        .get(signalId) as { episodeId: string; decision: string } | undefined;
-      if (!row) return false;
-      const decision = JSON.parse(row.decision) as Record<string, unknown>;
-      decision.presentation = presentation;
-      const updated = this.db
-        .prepare('UPDATE signals SET decision_json = ?, updated_at_ms = ? WHERE id = ?')
-        .run(JSON.stringify(decision), nowMs, signalId);
-      if (updated.changes !== 1) return false;
-      if (enqueueEdit)
-        this.db
-          .prepare(
-            `INSERT OR IGNORE INTO price_samples (
-              episode_id, signal_id, task_kind, due_at_ms, created_at_ms, updated_at_ms
-            ) VALUES (?, ?, 'telegram_edit_immediate_refresh', ?, ?, ?)`
-          )
-          .run(row.episodeId, signalId, nowMs, nowMs, nowMs);
-      return true;
-    });
-  }
-
   updatePendingSignalMarket(
     signalId: string,
     presentation: unknown,
@@ -1065,11 +1006,36 @@ export class Storage {
     });
   }
 
+  recordDeliverySnapshot(
+    signal: PendingOutboxSignal,
+    payload: unknown,
+    requestAtMs: number
+  ): Promise<string> {
+    return this.write(() => {
+      const id = randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO signal_delivery_snapshots
+        (id,signal_id,request_at_ms,payload_json,decision_json,quote_snapshot_json) VALUES (?,?,?,?,?,?)`
+        )
+        .run(
+          id,
+          signal.id,
+          requestAtMs,
+          serializeJson(payload),
+          serializeJson(signal.decision),
+          serializeJson(signal.quoteSnapshot)
+        );
+      return id;
+    });
+  }
+
   confirmTelegramDelivery(input: {
     signalId: string;
     chatId: string | number;
     messageId: number;
     nowMs: number;
+    snapshotId?: string;
     narrative?: boolean;
     outcomeCheckpointsMinutes?: readonly number[];
     narrativeOutcomeCheckpointsMinutes?: readonly number[];
@@ -1081,7 +1047,17 @@ export class Storage {
         )
         .get(input.signalId) as { episodeId: string; decision: string } | undefined;
       if (!signal) return false;
-      const decision = JSON.parse(signal.decision) as Record<string, unknown>;
+      const snapshot =
+        input.snapshotId === undefined
+          ? undefined
+          : (this.db
+              .prepare(
+                'SELECT decision_json AS decision FROM signal_delivery_snapshots WHERE id=? AND signal_id=?'
+              )
+              .get(input.snapshotId, input.signalId) as { decision: string } | undefined);
+      if (input.snapshotId !== undefined && !snapshot)
+        throw new Error('delivery snapshot does not match signal');
+      const decision = JSON.parse(snapshot?.decision ?? signal.decision) as Record<string, unknown>;
       const presentation = recordValue(decision.presentation);
       const features = recordValue(decision.features);
       const entryMarketPrice = decimalString(presentation?.priceUsd ?? features?.priceUsd);
@@ -1092,7 +1068,7 @@ export class Storage {
       const updated = this.db
         .prepare(
           `UPDATE signals SET delivery_state = 'SENT', telegram_chat_id = ?, telegram_message_id = ?,
-             telegram_confirmed_at_ms = ?, decision_json = ?, last_delivery_error = NULL, updated_at_ms = ?
+             telegram_confirmed_at_ms = ?, decision_json = ?, confirmed_snapshot_id = ?, last_delivery_error = NULL, updated_at_ms = ?
            WHERE id = ? AND delivery_state IN ('PENDING', 'DELIVERY_UNKNOWN')`
         )
         .run(
@@ -1100,6 +1076,7 @@ export class Storage {
           String(input.messageId),
           input.nowMs,
           serializeJson(decision),
+          input.snapshotId ?? null,
           input.nowMs,
           input.signalId
         );
@@ -1114,15 +1091,6 @@ export class Storage {
           episode_id, signal_id, task_kind, due_at_ms, created_at_ms, updated_at_ms
         ) VALUES (?, ?, ?, ?, ?, ?)`
       );
-      for (const minute of input.narrative ? [1, 5, 15, 30, 60, 120, 240] : [1, 5, 15, 30, 60])
-        statement.run(
-          signal.episodeId,
-          input.signalId,
-          `telegram_edit_${minute}m`,
-          input.nowMs + minute * 60_000,
-          input.nowMs,
-          input.nowMs
-        );
       const outcomeMinutes = [
         ...(input.outcomeCheckpointsMinutes ?? []),
         ...(input.narrative ? (input.narrativeOutcomeCheckpointsMinutes ?? []) : [])
@@ -1147,124 +1115,6 @@ export class Storage {
           )
           .run(Math.max(...outcomeMinutes) * 60_000, input.signalId);
       return true;
-    });
-  }
-
-  scheduleTelegramEdits(input: {
-    episodeId: string;
-    signalId: string;
-    confirmedAtMs: number;
-    narrative: boolean;
-  }): Promise<void> {
-    const minutes = input.narrative ? [1, 5, 15, 30, 60, 120, 240] : [1, 5, 15, 30, 60];
-    return this.transaction(() => {
-      const statement = this.db.prepare(
-        `INSERT OR IGNORE INTO price_samples (
-          episode_id, signal_id, task_kind, due_at_ms, created_at_ms, updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?)`
-      );
-      for (const minute of minutes) {
-        const dueAtMs = input.confirmedAtMs + minute * 60_000;
-        statement.run(
-          input.episodeId,
-          input.signalId,
-          `telegram_edit_${minute}m`,
-          dueAtMs,
-          input.confirmedAtMs,
-          input.confirmedAtMs
-        );
-      }
-    });
-  }
-
-  scheduleImmediateTelegramEdit(input: {
-    episodeId: string;
-    signalId: string;
-    reason: 'evidence' | 'risk' | 'quote';
-    nowMs: number;
-  }): Promise<void> {
-    return this.write(() => {
-      this.db
-        .prepare(
-          `INSERT OR IGNORE INTO price_samples (
-            episode_id, signal_id, task_kind, due_at_ms, created_at_ms, updated_at_ms
-          ) VALUES (?, ?, ?, ?, ?, ?)`
-        )
-        .run(
-          input.episodeId,
-          input.signalId,
-          `telegram_edit_immediate_${input.reason}`,
-          input.nowMs,
-          input.nowMs,
-          input.nowMs
-        );
-    });
-  }
-
-  dueTelegramEdits(nowMs: number): Promise<DueTelegramEdit[]> {
-    return this.write(
-      () =>
-        this.db
-          .prepare(
-            `SELECT sample.id AS taskId, sample.signal_id AS signalId, sample.episode_id AS episodeId,
-                  signal.telegram_chat_id AS chatId, signal.telegram_message_id AS messageId,
-                  signal.decision_json AS decision, signal.quote_snapshot_json AS quoteSnapshot,
-                  sample.task_kind AS taskKind
-           FROM price_samples AS sample JOIN signals AS signal ON signal.id = sample.signal_id
-           WHERE sample.status = 'PENDING' AND sample.task_kind LIKE 'telegram_edit_%'
-             AND COALESCE(sample.next_attempt_at_ms, sample.target_at_ms, sample.due_at_ms) <= ? AND signal.telegram_tracking_stopped = 0
-             AND signal.telegram_deleted = 0 AND signal.delivery_state = 'SENT'
-           ORDER BY sample.due_at_ms, sample.id`
-          )
-          .all(nowMs)
-          .map((row) => {
-            const candidate = row as Omit<DueTelegramEdit, 'decision' | 'quoteSnapshot'> & {
-              decision: string;
-              quoteSnapshot: string;
-            };
-            return {
-              ...candidate,
-              messageId: Number(candidate.messageId),
-              decision: JSON.parse(candidate.decision) as unknown,
-              quoteSnapshot: JSON.parse(candidate.quoteSnapshot) as unknown
-            };
-          }) as DueTelegramEdit[]
-    );
-  }
-
-  completeTelegramEdit(taskId: number, nowMs: number): Promise<void> {
-    return this.write(() => {
-      this.db
-        .prepare(
-          "UPDATE price_samples SET status = 'COMPLETE', completed_at_ms = ?, updated_at_ms = ? WHERE id = ?"
-        )
-        .run(nowMs, nowMs, taskId);
-    });
-  }
-
-  completeDueTelegramEditsForSignal(
-    signalId: string,
-    dueThroughMs: number,
-    nowMs: number
-  ): Promise<void> {
-    return this.write(() => {
-      this.db
-        .prepare(
-          `UPDATE price_samples SET status = 'COMPLETE', completed_at_ms = ?, updated_at_ms = ?
-           WHERE signal_id = ? AND status = 'PENDING' AND task_kind LIKE 'telegram_edit_%'
-             AND COALESCE(next_attempt_at_ms,target_at_ms,due_at_ms) <= ?`
-        )
-        .run(nowMs, nowMs, signalId, dueThroughMs);
-    });
-  }
-
-  deferTelegramEdit(taskId: number, retryAtMs: number, nowMs: number): Promise<void> {
-    return this.write(() => {
-      this.db
-        .prepare(
-          "UPDATE price_samples SET next_attempt_at_ms = ?, requested_at_ms = ?, updated_at_ms = ? WHERE id = ? AND status = 'PENDING'"
-        )
-        .run(retryAtMs, nowMs, nowMs, taskId);
     });
   }
 
@@ -2000,30 +1850,12 @@ export class Storage {
     nowMs: number
   ): Promise<void> {
     return this.write(() => {
-      const prior = this.db
-        .prepare(
-          `SELECT json_extract(decision_json,'$.riskStatus.status') AS status,json_extract(decision_json,'$.riskStatus.reason') AS reason FROM signals WHERE delivery_state='SENT' AND episode_id IN (SELECT id FROM episodes WHERE token_address=?)`
-        )
-        .all(token) as { status: string | null; reason: string | null }[];
-      const changed = prior.some((p) => p.status !== status || p.reason !== reason);
       this.db
         .prepare(
           `UPDATE signals SET decision_json=json_set(decision_json,'$.riskStatus',json(?)),updated_at_ms=?
         WHERE delivery_state='SENT' AND episode_id IN (SELECT id FROM episodes WHERE token_address=?)`
         )
         .run(serializeJson({ status, reason, checkedAtMs: nowMs }), nowMs, token);
-      const signals = this.db
-        .prepare(
-          `SELECT id,episode_id AS episodeId FROM signals WHERE delivery_state='SENT' AND telegram_tracking_stopped=0 AND telegram_deleted=0 AND episode_id IN (SELECT id FROM episodes WHERE token_address=?)`
-        )
-        .all(token) as { id: string; episodeId: string }[];
-      if (changed && status !== 'passed')
-        for (const signal of signals)
-          this.db
-            .prepare(
-              `INSERT OR IGNORE INTO price_samples(episode_id,signal_id,task_kind,due_at_ms,created_at_ms,updated_at_ms) VALUES (?,?,'telegram_edit_immediate_risk',?,?,?)`
-            )
-            .run(signal.episodeId, signal.id, nowMs, nowMs, nowMs);
     });
   }
   retainAudit(

@@ -46,7 +46,7 @@ void test('renders the approved signal card with socials at the bottom', () => {
   assert.doesNotMatch(text, /模拟|往返成本|最大安全仓位|数据源/);
   assert.doesNotMatch(text, /🧠 叙事/);
   assert.ok(text.indexOf('🔗 官网') > text.indexOf('🛡 风险检查'));
-  assert.ok(text.indexOf('⏱ 8秒前') > text.indexOf('🔗 官网'));
+  assert.ok(text.indexOf('推送快照 1970-01-01 00:00:09 UTC') > text.indexOf('🔗 官网'));
 });
 
 void test('embeds a safe copyable CA and social hyperlinks in the rich card', () => {
@@ -61,6 +61,8 @@ void test('embeds a safe copyable CA and social hyperlinks in the rich card', ()
   assert.match(rich.html, /浏览热度：🔥 6,789/);
   assert.match(rich.html, /<\/p>\n<br>\n<p>/);
   assert.doesNotMatch(rich.html, /原始|扣 5\.0/);
+  assert.match(rich.html, /推送参考价：/);
+  assert.match(rich.html, /推送快照 1970-01-01 00:00:09 UTC/);
   assert.equal(rich.skip_entity_detection, true);
 });
 

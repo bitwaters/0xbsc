@@ -82,12 +82,18 @@ export class OutboxDeliveryService {
     const payload = this.options.render(preparedSignal);
     try {
       const requestAtMs = this.options.now?.() ?? Date.now();
-      await this.options.onTrace?.(preparedSignal, 'telegram_request', requestAtMs);
       if ((payload.text === undefined) === (payload.richMessage === undefined))
         throw new TelegramError(
           'schema',
           'delivery payload requires exactly one message content field'
         );
+      // Persist the exact content before sending, including attempts with uncertain responses.
+      const snapshotId = await this.options.storage.recordDeliverySnapshot(
+        preparedSignal,
+        payload,
+        requestAtMs
+      );
+      await this.options.onTrace?.(preparedSignal, 'telegram_request', requestAtMs);
       const message =
         payload.richMessage === undefined
           ? await this.options.telegram.sendMessage({
@@ -106,6 +112,7 @@ export class OutboxDeliveryService {
         chatId: message.chatId,
         messageId: message.messageId,
         nowMs: confirmedAtMs,
+        snapshotId,
         narrative: hasNarrativeEvidence(preparedSignal.decision),
         ...(this.options.outcomeCheckpointsMinutes === undefined
           ? {}

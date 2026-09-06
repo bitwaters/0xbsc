@@ -48,7 +48,6 @@ async function withHandler(
       allowedChatIds: ['-100'],
       allowedUserIds: ['7'],
       now: () => now,
-      onRefresh: () => Promise.resolve(calls.push('refresh-work')).then(() => undefined),
       onBought: () => Promise.resolve(calls.push('bought-note')).then(() => undefined)
     });
     await run({ handler, storage, calls });
@@ -68,13 +67,7 @@ void test('authorizes, associates and makes repeated callback updates idempotent
     assert.equal(await handler.handle(callback(1, 'refresh:sig-callback')), 'handled');
     assert.equal(await handler.handle(callback(1, 'refresh:sig-callback')), 'duplicate');
     assert.equal(await handler.handle(callback(2, 'refresh:sig-callback')), 'handled');
-    assert.deepEqual(calls, [
-      'refresh-work',
-      'answerCallbackQuery',
-      'answerCallbackQuery',
-      'refresh-work',
-      'answerCallbackQuery'
-    ]);
+    assert.deepEqual(calls, ['answerCallbackQuery', 'answerCallbackQuery', 'answerCallbackQuery']);
     assert.equal(
       (
         storage.db.prepare('SELECT COUNT(*) AS count FROM telegram_updates').get() as {
@@ -231,8 +224,7 @@ void test('an empty administrator list denies legacy management actions with no 
       }),
       allowedChatIds: ['-100'],
       allowedUserIds: [],
-      now: () => 1_000,
-      onRefresh: () => Promise.resolve(calls.push('refresh-work')).then(() => undefined)
+      now: () => 1_000
     });
     for (const [index, action] of ['refresh', 'bought', 'stop', 'delete'].entries())
       assert.equal(

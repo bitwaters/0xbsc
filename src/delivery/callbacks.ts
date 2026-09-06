@@ -12,7 +12,6 @@ export class TelegramCallbackHandler {
       allowedChatIds: readonly string[];
       allowedUserIds: readonly string[];
       now?: () => number;
-      onRefresh?: (signalId: string) => Promise<void>;
       onBought?: (signalId: string, userId: string) => Promise<void>;
     }
   ) {}
@@ -62,7 +61,13 @@ export class TelegramCallbackHandler {
         await this.options.telegram.answerCallbackQuery(callbackQuery.id, tokenAddress);
         return 'handled';
       }
-      if (parsed.action === 'refresh') await this.options.onRefresh?.(parsed.signalId);
+      if (parsed.action === 'refresh') {
+        await this.options.telegram.answerCallbackQuery(
+          callbackQuery.id,
+          '原始信号已冻结，请通过 GMGN 查看最新行情'
+        );
+        return 'handled';
+      }
       if (parsed.action === 'bought') await this.options.onBought?.(parsed.signalId, userId);
       if (parsed.action === 'delete') {
         await this.options.telegram.deleteMessage(callbackQuery.chatId, callbackQuery.messageId);

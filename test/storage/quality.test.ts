@@ -127,7 +127,7 @@ void test('migration preserves legacy values and supports idempotent restart', a
     await rm(dir, { recursive: true, force: true });
   }
 });
-void test('risk changes reach sent signals independently of active Episodes and do not loop edits', async () => {
+void test('risk changes are tracked internally without scheduling card edits', async () => {
   const storage = await Storage.open(':memory:');
   try {
     await seed(storage);
@@ -141,7 +141,7 @@ void test('risk changes reach sent signals independently of active Episodes and 
     await storage.recordSentRisk('0xq', 'failed', 'honeypot', 2000);
     assert.equal(
       (storage.db.prepare('SELECT count(*) AS n FROM price_samples').get() as { n: number }).n,
-      1
+      0
     );
     const row = storage.db
       .prepare("SELECT json_extract(decision_json,'$.riskStatus.status') AS status FROM signals")
@@ -590,6 +590,76 @@ void test('upgrade classifies old failures without changing their history or rep
     assert.equal(metrics.preparationFailures, 1);
     assert.equal(metrics.preSendCancellations, 1);
     assert.equal((await storage.pendingOutboxSignals(2000)).length, 0);
+    assert.deepEqual(storage.db.pragma('foreign_key_check'), []);
+  } finally {
+    storage.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+void test('immutable-card upgrade cancels old edits while preserving outcomes and historical message evidence', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'immutable-upgrade-'));
+  const migrations = join(dir, 'migrations');
+  const { mkdir } = await import('node:fs/promises');
+  await mkdir(migrations);
+  const source = new URL('../../src/storage/migrations/', import.meta.url);
+  for (const name of await readdir(source))
+    if (name < '014')
+      await writeFile(join(migrations, name), await readFile(new URL(name, source)));
+  let storage = await Storage.open(join(dir, 'db'), migrations);
+  try {
+    await seed(storage);
+    storage.db
+      .prepare(
+        "INSERT INTO signals(id,episode_id,config_revision_id,delivery_state,quote_snapshot_json,decision_json,created_at_ms,updated_at_ms) VALUES('sig','ep','cfg','SENT','{}','{\"marketEntryPriceUsd\":\"1\",\"presentation\":{\"priceUsd\":\"0.5\"}}',1,1)"
+      )
+      .run();
+    storage.db
+      .prepare(
+        "INSERT INTO price_samples(episode_id,signal_id,task_kind,due_at_ms,status,created_at_ms,updated_at_ms) VALUES('ep','sig','telegram_edit_60m',3601000,'PENDING',1,1),('ep','sig','outcome_60m',3601000,'PENDING',1,1),('ep','sig','telegram_edit_30m',1801000,'COMPLETE',1,1)"
+      )
+      .run();
+    const before = storage.db
+      .prepare("SELECT * FROM price_samples WHERE task_kind='outcome_60m'")
+      .get();
+    const decision = storage.db.prepare('SELECT decision_json FROM signals').get();
+    storage.close();
+    storage = await Storage.open(join(dir, 'db'));
+    assert.deepEqual(
+      storage.db.prepare("SELECT * FROM price_samples WHERE task_kind='outcome_60m'").get(),
+      before
+    );
+    assert.deepEqual(storage.db.prepare('SELECT decision_json FROM signals').get(), decision);
+    assert.deepEqual(storage.db.prepare('SELECT confirmed_snapshot_id AS id FROM signals').get(), {
+      id: null
+    });
+    assert.deepEqual(
+      storage.db
+        .prepare(
+          "SELECT task_kind AS kind,status FROM price_samples WHERE task_kind LIKE 'telegram_edit_%' ORDER BY kind"
+        )
+        .all(),
+      [
+        { kind: 'telegram_edit_30m', status: 'COMPLETE' },
+        { kind: 'telegram_edit_60m', status: 'CANCELLED' }
+      ]
+    );
+    assert.throws(
+      () =>
+        storage.db
+          .prepare("UPDATE price_samples SET status='PENDING' WHERE task_kind='telegram_edit_60m'")
+          .run(),
+      /cannot be edited/
+    );
+    assert.throws(
+      () =>
+        storage.db
+          .prepare(
+            "INSERT INTO price_samples(episode_id,task_kind,due_at_ms,status,created_at_ms,updated_at_ms) VALUES('ep','telegram_edit_immediate_risk',1,'PENDING',1,1)"
+          )
+          .run(),
+      /cannot be edited/
+    );
     assert.deepEqual(storage.db.pragma('foreign_key_check'), []);
   } finally {
     storage.close();

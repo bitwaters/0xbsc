@@ -44,7 +44,7 @@ export function formatSignal(signal: SignalPresentation): string {
     `最终评分 ${signal.score.toFixed(1)} / 100 · 完整度 ${(signal.completeness * 100).toFixed(0)}%`,
     '',
     '💹 市场数据',
-    `价格       ${formatPrice(signal.priceUsd)}`,
+    `推送参考价 ${formatPrice(signal.priceUsd)}`,
     `MC         ${formatUsd(signal.marketCapUsd)}`,
     `流动性     ${formatUsd(signal.liquidityUsd)}`,
     `持有人数   ${formatCount(signal.holderCount)}`,
@@ -60,7 +60,7 @@ export function formatSignal(signal: SignalPresentation): string {
     '⚠️ Meme 代币仍可能快速失去流动性'
   ];
   appendSocials(lines, signal, (label, url) => `${label}: ${url}`);
-  lines.push('', `⏱ ${relativeAge(signal)} · 信号 #${shortSignalId(signal.signalId)}`);
+  lines.push('', `推送快照 ${snapshotTime(signal)} · 信号 #${shortSignalId(signal.signalId)}`);
   return lines.join('\n');
 }
 
@@ -89,11 +89,11 @@ export function formatRichSignal(signal: SignalPresentation): InputRichMessage {
     ].join('\n'),
     `<p><b>CA</b> <tg-button type="copy_text" text="${escapeAttribute(signal.tokenAddress)}">${escapeHtml(signal.tokenAddress)} ⧉</tg-button></p>`,
     `<p><b>⭐ ${grade(signal.score)} 级信号</b><br>最终评分 ${signal.score.toFixed(1)} / 100 · 完整度 ${(signal.completeness * 100).toFixed(0)}%</p>`,
-    `<p><b>💹 市场数据</b><br>价格：${escapeHtml(formatPrice(signal.priceUsd))}<br>MC：${escapeHtml(formatUsd(signal.marketCapUsd))}<br>流动性：${escapeHtml(formatUsd(signal.liquidityUsd))}<br>持有人数：${escapeHtml(formatCount(signal.holderCount))}<br>浏览热度：${escapeHtml(formatHeat(signal.visitingCount))}<br>币龄：${escapeHtml(formatAge(signal.ageMs))}</p>`,
+    `<p><b>💹 市场数据</b><br>推送参考价：${escapeHtml(formatPrice(signal.priceUsd))}<br>MC：${escapeHtml(formatUsd(signal.marketCapUsd))}<br>流动性：${escapeHtml(formatUsd(signal.liquidityUsd))}<br>持有人数：${escapeHtml(formatCount(signal.holderCount))}<br>浏览热度：${escapeHtml(formatHeat(signal.visitingCount))}<br>币龄：${escapeHtml(formatAge(signal.ageMs))}</p>`,
     `<p><b>🔥 触发原因</b><br>${reasonHtml}</p>`,
     `<p><b>🛡 风险检查</b><br>${riskHtml}</p>`,
     ...optional,
-    `<footer>⏱ ${escapeHtml(relativeAge(signal))} · 信号 #${escapeHtml(shortSignalId(signal.signalId))}</footer>`
+    `<footer>推送快照 ${escapeHtml(snapshotTime(signal))} · 信号 #${escapeHtml(shortSignalId(signal.signalId))}</footer>`
   ];
   return {
     html: sections.join('\n<br>\n'),
@@ -194,12 +194,11 @@ function formatAge(value: number | undefined): string {
   return `${Math.floor(hours / 24)}天${hours % 24}小时`;
 }
 
-function relativeAge(signal: SignalPresentation): string {
-  const elapsed = Math.max(0, (signal.renderedAtMs ?? Date.now()) - signal.observedAtMs);
-  if (elapsed < 60_000) return `${Math.floor(elapsed / 1_000)}秒前`;
-  if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)}分钟前`;
-  if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)}小时前`;
-  return `${Math.floor(elapsed / 86_400_000)}天前`;
+function snapshotTime(signal: SignalPresentation): string {
+  return (
+    new Date(signal.renderedAtMs ?? Date.now()).toISOString().slice(0, 19).replace('T', ' ') +
+    ' UTC'
+  );
 }
 
 function shortSignalId(value: string): string {

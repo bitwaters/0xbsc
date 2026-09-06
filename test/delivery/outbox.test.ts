@@ -100,7 +100,15 @@ void test('confirms a pending Outbox message atomically with its Telegram messag
       assert.deepEqual(storage.db.prepare('SELECT ended_at_ms AS endedAtMs FROM episodes').get(), {
         endedAtMs: 1_001
       });
-      await storage.updateSignalPresentation('sig-delivery', { priceUsd: '0.84' }, 2_000, false);
+      assert.throws(
+        () =>
+          storage.db
+            .prepare(
+              "UPDATE signals SET decision_json=json_set(decision_json,'$.presentation.priceUsd','0.84')"
+            )
+            .run(),
+        /immutable/
+      );
       const decision = JSON.parse(
         (
           storage.db.prepare('SELECT decision_json AS decision FROM signals').get() as {
@@ -117,7 +125,7 @@ void test('confirms a pending Outbox message atomically with its Telegram messag
         score: 80,
         marketEntryPriceUsd: '0.42',
         marketEntryAtMs: 1_001,
-        presentation: { priceUsd: '0.84' }
+        presentation: { priceUsd: '0.42' }
       });
     }
   );
@@ -261,7 +269,7 @@ void test('schedules follow-up work only after Telegram confirmation', async () 
             )
             .get() as { count: number }
         ).count,
-        5
+        0
       );
       assert.equal(
         (
@@ -465,4 +473,134 @@ void test('has no delivery count quota and never auto-deletes confirmed formal s
     storage.close();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+void test('persists exact rich payload before HTTP and keeps it immutable through later risk tracking', async () => {
+  await withOutbox(
+    () => Promise.resolve({}),
+    async ({ storage }) => {
+      const payload = {
+        richMessage: { html: '<p>推送参考价：$0.42</p>', skip_entity_detection: true },
+        replyMarkup: { inline_keyboard: [[{ text: 'GMGN', url: 'https://gmgn.ai/' }]] }
+      };
+      const service = new OutboxDeliveryService({
+        storage,
+        chatId: '-100',
+        render: () => payload,
+        prepareBeforeDelivery: (signal) =>
+          storage.updatePendingSignalMarket(
+            signal.id,
+            { priceUsd: '0.42' },
+            { accepted: true },
+            1000
+          ),
+        revalidateBeforeUnknownRetry: () => Promise.resolve(true),
+        outcomeCheckpointsMinutes: [1, 3],
+        now: () => 1000,
+        telegram: new TelegramClient({
+          botToken: 'token',
+          transport: () => {
+            const snapshot = storage.db
+              .prepare('SELECT payload_json AS payload FROM signal_delivery_snapshots')
+              .get() as { payload: string };
+            assert.deepEqual(JSON.parse(snapshot.payload), payload);
+            return Promise.resolve({
+              status: 200,
+              body: { ok: true, result: { message_id: 99, chat: { id: '-100' } } }
+            });
+          }
+        })
+      });
+      assert.equal(await service.deliver((await storage.pendingOutboxSignals(1000))[0]!), 'sent');
+      const before = storage.db.prepare('SELECT * FROM signal_delivery_snapshots').all();
+      await storage.recordSentRisk('0xoutbox-delivery', 'failed', 'honeypot', 2000);
+      assert.deepEqual(storage.db.prepare('SELECT * FROM signal_delivery_snapshots').all(), before);
+      assert.throws(
+        () => storage.db.prepare("UPDATE signal_delivery_snapshots SET payload_json='{}'").run(),
+        /immutable/
+      );
+      assert.throws(
+        () => storage.db.prepare('DELETE FROM signal_delivery_snapshots').run(),
+        /immutable/
+      );
+      assert.throws(
+        () => storage.db.prepare('UPDATE signals SET confirmed_snapshot_id=NULL').run(),
+        /immutable/
+      );
+      assert.deepEqual(
+        storage.db
+          .prepare(
+            "SELECT DISTINCT entry_market_price AS price,entry_at_ms AS time FROM price_samples WHERE task_kind LIKE 'outcome_%'"
+          )
+          .all(),
+        [{ price: '0.42', time: 1000 }]
+      );
+      assert.equal(
+        (
+          storage.db
+            .prepare(
+              "SELECT count(*) AS n FROM price_samples WHERE task_kind LIKE 'telegram_edit_%'"
+            )
+            .get() as { n: number }
+        ).n,
+        0
+      );
+      assert.equal(
+        (
+          storage.db
+            .prepare(
+              'SELECT count(*) AS n FROM signals s JOIN signal_delivery_snapshots d ON d.id=s.confirmed_snapshot_id AND d.signal_id=s.id'
+            )
+            .get() as { n: number }
+        ).n,
+        1
+      );
+    }
+  );
+});
+
+void test('unknown delivery retry preserves both attempts and links only the confirmed snapshot', async () => {
+  let attemptStorage: Storage;
+  await withOutbox(
+    (attempt) => {
+      assert.equal(
+        (
+          attemptStorage.db
+            .prepare('SELECT count(*) AS n FROM signal_delivery_snapshots')
+            .get() as { n: number }
+        ).n,
+        attempt
+      );
+      if (attempt === 1) return Promise.reject(new TelegramError('timeout', 'unknown response'));
+      return Promise.resolve({ ok: true, result: { message_id: 99, chat: { id: '-100' } } });
+    },
+    async ({ storage, service }) => {
+      attemptStorage = storage;
+      assert.equal(
+        await service.deliver((await storage.pendingOutboxSignals(1000))[0]!),
+        'unknown'
+      );
+      const first = storage.db.prepare('SELECT * FROM signal_delivery_snapshots').get() as {
+        id: string;
+      };
+      await service.recoverAndDeliver();
+      assert.deepEqual(
+        storage.db.prepare('SELECT * FROM signal_delivery_snapshots WHERE id=?').get(first.id),
+        first
+      );
+      const signal = storage.db
+        .prepare('SELECT delivery_state AS state,confirmed_snapshot_id AS id FROM signals')
+        .get() as { state: string; id: string };
+      assert.equal(signal.state, 'SENT');
+      assert.notEqual(signal.id, first.id);
+      assert.equal(
+        (
+          storage.db.prepare('SELECT count(*) AS n FROM signal_delivery_snapshots').get() as {
+            n: number;
+          }
+        ).n,
+        2
+      );
+    }
+  );
 });

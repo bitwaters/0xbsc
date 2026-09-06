@@ -99,3 +99,18 @@ for bounded repair. Legacy samples are excluded. `initial_checkpoint_json` prese
 original result; entry/target/horizon coordinates remain unchanged. The report exposes repaired
 checkpoint counts, bounded coverage, pending repairs and coverage reasons. These counters are
 not evidence of signal profitability or permission to enable a shadow strategy.
+
+## Immutable-card upgrade (migration 014)
+
+Back up the live database before upgrading. Pending `telegram_edit_%` tasks become CANCELLED;
+completed edit history, outcome tasks and frozen entry coordinates remain untouched.
+The runtime no longer runs an edit worker. Database guards reject new/revived edit tasks
+and changes to sent market baselines. Internal risk updates remain separate from the
+immutable delivery snapshot. This does not disable background evaluation or formal delivery.
+
+`signal_delivery_snapshots` retains exact payload, decision, Quote and request timestamp per
+HTTP attempt; `signals.confirmed_snapshot_id` identifies the confirmed attempt. Snapshot
+rows cannot be updated or deleted. A null link on an older signal means the original full
+message was not captured; it does not mean its frozen price is missing. Never reconstruct
+that historical message with later market data. Follow-up results remain in the backend
+and reports; this release adds no new automatic Telegram result or risk messages.
