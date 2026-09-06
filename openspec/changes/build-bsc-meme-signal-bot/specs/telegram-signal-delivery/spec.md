@@ -24,7 +24,7 @@
 
 ### Requirement: Telegram is called directly over HTTP
 
-系统 SHALL 直接使用 Telegram Bot API 支持发送、编辑、删除消息、`getUpdates` 长轮询和 Inline Keyboard，不引入 Telegram Bot 框架。消息 MUST 展示路线、合约、触发及支持来源、分数、完整度、流动性、三档往返成本、最大安全仓位、风险提示和时间戳；创建者历史触发扣分时，风险提示 MUST 展示累计创建数、开放比例和实际扣分。初始按钮集合 SHALL 包括 GMGN 详情、复制合约、刷新状态、标记已买、停止跟踪和删除消息；按钮文字和启用状态从唯一 YAML 读取。
+系统 SHALL 直接使用 Telegram Bot API 支持发送、编辑、删除消息、`getUpdates` 长轮询和 Inline Keyboard，不引入 Telegram Bot 框架。消息 MUST 展示路线、合约、触发及支持来源、分数、完整度、流动性、三档往返成本、最大安全仓位、风险提示和时间戳；创建者历史触发扣分时，风险提示 MUST 展示累计创建数、开放比例和实际扣分。当前外部按钮集合 SHALL 仅包括 GMGN 详情 URL 按钮；合约复制使用消息正文原生复制控件。两者 MUST 对所有阅读者开放，不经过机器人管理员鉴权；GMGN 按钮文字从 YAML 读取。
 
 #### Scenario: A formal signal is delivered successfully
 
@@ -33,7 +33,7 @@
 
 ### Requirement: Callback actions are authorized
 
-按钮回调 MUST 仅接受唯一配置中允许的 Chat 和用户；每个回调 SHALL 验证消息或信号关联后再执行动作。刷新状态 MUST 通过同一个 GMGN 加权调度器且不得绕过安全和新鲜度规则；标记已买只保存用户注释，MUST NOT 发起交易；停止跟踪只停止该消息后续自动编辑，后台标准质量采样继续执行；删除消息只调用 Telegram 删除并标记消息不可再编辑，MUST NOT 删除数据库样本。GMGN 详情和复制合约不得产生交易副作用。回调状态变更 MUST 幂等，同一个 Telegram update 被长轮询重复取得时不得重复产生副作用。
+兼容旧消息的管理回调 MUST 仅接受合并配置中允许的 Chat 和管理员用户；空管理员名单 MUST 拒绝全部管理回调，但不得阻止正式推送和公共链接访问；每个回调 SHALL 验证消息或信号关联后再执行动作。刷新状态 MUST 通过同一个 GMGN 加权调度器且不得绕过安全和新鲜度规则；标记已买只保存用户注释，MUST NOT 发起交易；停止跟踪只停止该消息后续自动编辑，后台标准质量采样继续执行；删除消息只调用 Telegram 删除并标记消息不可再编辑，MUST NOT 删除数据库样本。GMGN 详情和复制合约不得产生交易副作用。回调状态变更 MUST 幂等，同一个 Telegram update 被长轮询重复取得时不得重复产生副作用。
 
 #### Scenario: Unauthorized user presses a button
 
@@ -109,3 +109,8 @@ Telegram 请求在可能已送达但响应未知时 MUST 标记为 `DELIVERY_UNK
 
 - **WHEN** 已 SENT 代币后续检查发现风险，而原 Episode 已终止
 - **THEN** 系统仍能更新该信号风险状态；重复相同风险不得无限创建编辑任务
+
+#### Scenario: Public links and administrator actions are separate
+
+- **WHEN** 未配置管理员或普通阅读者点击 GMGN 链接
+- **THEN** 链接仍可直接打开，不产生 callback_query；旧消息的修改类回调维持管理员鉴权。当前版本尚未实现快捷指令，后续管理指令 MUST 仅允许管理员执行

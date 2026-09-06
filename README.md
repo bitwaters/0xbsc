@@ -40,7 +40,11 @@ and formatting/linting. For direct Node execution, put `config.yaml` and optiona
 ## Container operation
 
 Copy `config.example.yaml` to `config.yaml` and `.env.example` to `.env` in the project directory.
-Fill in the six fields in `.env`; the credentials and runtime mode override their YAML counterparts.
+Fill in the credentials, destination chat IDs and runtime mode in `.env`; they override YAML.
+`TELEGRAM_ALLOWED_USER_IDS` is an optional administrator list, not a link-button allowlist.
+GMGN links are open to everyone. Leaving administrators blank disables management actions
+without blocking delivery. The current release handles legacy management callbacks; shortcut
+commands have not been implemented.
 Strategy settings stay in YAML. An empty `.env` retains YAML-only configuration. Blank required
 fields or placeholder credentials prevent startup before any API requests or database writes.
 

@@ -33,7 +33,8 @@ gmgn:
 telegram:
   bot_token: REPLACE_ME
   chat_ids: ['-1000000000000']
-  allowed_user_ids: ['1000000000']
+  # Administrators for privileged actions only; GMGN links are public. Empty denies all admin actions.
+  allowed_user_ids: []
   buttons:
     gmgn_detail: GMGN 详情
 polling:

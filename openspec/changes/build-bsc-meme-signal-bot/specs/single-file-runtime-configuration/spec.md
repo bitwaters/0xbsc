@@ -6,7 +6,7 @@
 
 ### Requirement: Runtime configuration has one source of truth
 
-生产进程 SHALL 读取 `~/.config/gmgn-signal-bot/config.yaml` 管理全部策略与存储参数。按部署要求，同目录可选的 `.env` SHALL 只覆盖 RUNTIME_MODE、GMGN_API_KEY、GMGN_QUOTE_WALLET、TELEGRAM_BOT_TOKEN、TELEGRAM_CHAT_IDS 和 TELEGRAM_ALLOWED_USER_IDS 六个字段，优先于 YAML；空文件或缺失文件保持原 YAML 行为。非空 `.env` MUST 完整填写六个字段，未知字段或缺失值拒绝启动。程序不得把进程环境当作隐式配置来源。SEA 上两个文件 MUST 位于 `/www/wwwroot/0xbsc/`，由 Compose 只读挂载，不写入镜像或容器环境。
+生产进程 SHALL 读取 `~/.config/gmgn-signal-bot/config.yaml` 管理全部策略与存储参数。按部署要求，同目录可选的 `.env` SHALL 只覆盖 RUNTIME_MODE、GMGN_API_KEY、GMGN_QUOTE_WALLET、TELEGRAM_BOT_TOKEN、TELEGRAM_CHAT_IDS 和 TELEGRAM_ALLOWED_USER_IDS 六个字段，优先于 YAML；空文件或缺失文件保持原 YAML 行为。非空 `.env` MUST 填写模式、GMGN Key、公开报价钱包、Telegram Token 和目标 Chat；管理员 TELEGRAM_ALLOWED_USER_IDS MAY 留空或省略，合并后管理员名单为空且不得继承 YAML 中的管理员。未知字段或其他必填值缺失拒绝启动。程序不得把进程环境当作隐式配置来源。SEA 上两个文件 MUST 位于 `/www/wwwroot/0xbsc/`，由 Compose 只读挂载，不写入镜像或容器环境。
 
 #### Scenario: Required value is missing or invalid
 

@@ -217,3 +217,39 @@ void test('long polling resumes after the persisted Telegram update offset', asy
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+void test('an empty administrator list denies legacy management actions with no state changes', async () => {
+  await withHandler(async ({ storage, calls }) => {
+    const handler = new TelegramCallbackHandler({
+      storage,
+      telegram: new TelegramClient({
+        botToken: 'token',
+        transport: (method) => {
+          calls.push(method);
+          return Promise.resolve({ status: 200, body: { ok: true, result: true } });
+        }
+      }),
+      allowedChatIds: ['-100'],
+      allowedUserIds: [],
+      now: () => 1_000,
+      onRefresh: () => Promise.resolve(calls.push('refresh-work')).then(() => undefined)
+    });
+    for (const [index, action] of ['refresh', 'bought', 'stop', 'delete'].entries())
+      assert.equal(
+        await handler.handle(callback(100 + index, `${action}:sig-callback`)),
+        'unauthorized'
+      );
+    assert.deepEqual(calls, Array<string>(4).fill('answerCallbackQuery'));
+    assert.deepEqual(
+      storage.db
+        .prepare(
+          'SELECT telegram_tracking_stopped AS stopped, telegram_deleted AS deleted FROM signals'
+        )
+        .get(),
+      { stopped: 0, deleted: 0 }
+    );
+    assert.deepEqual(storage.db.prepare('SELECT COUNT(*) AS count FROM signal_actions').get(), {
+      count: 0
+    });
+  });
+});

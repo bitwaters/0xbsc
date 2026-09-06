@@ -103,7 +103,7 @@ const runtimeConfigSchema = z
       .object({
         bot_token: z.string().min(1),
         chat_ids: z.array(z.string()).min(1),
-        allowed_user_ids: z.array(z.string()).min(1),
+        allowed_user_ids: z.array(z.string().regex(/^[1-9]\d*$/)).default([]),
         buttons: z.object({ gmgn_detail: z.string().min(1) }).catchall(z.string().min(1))
       })
       .strict(),
@@ -297,8 +297,9 @@ const chatIds = z
   .pipe(z.array(z.string().regex(/^-?[1-9]\d*$/)).min(1));
 const userIds = z
   .string()
-  .transform((value) => value.split(',').map((id) => id.trim()))
-  .pipe(z.array(z.string().regex(/^[1-9]\d*$/)).min(1));
+  .default('')
+  .transform((value) => (value.trim() === '' ? [] : value.split(',').map((id) => id.trim())))
+  .pipe(z.array(z.string().regex(/^[1-9]\d*$/)));
 const credentialFileSchema = z
   .object({
     RUNTIME_MODE: z.enum(['dry_run', 'live']),

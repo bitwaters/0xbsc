@@ -221,3 +221,44 @@ void test('unconfigured YAML placeholders refuse startup before opening the data
     await rm(fixture.directory, { recursive: true, force: true });
   }
 });
+
+void test('blank or omitted env administrators clear YAML administrators without blocking live delivery', async () => {
+  const fixture = await configFile();
+  try {
+    for (const replacement of ['TELEGRAM_ALLOWED_USER_IDS=', 'TELEGRAM_ALLOWED_USER_IDS=   ', '']) {
+      await writeFile(
+        join(fixture.directory, '.env'),
+        validEnv.replace('TELEGRAM_ALLOWED_USER_IDS=123,456', replacement),
+        { mode: 0o600 }
+      );
+      const { config } = await loadRuntimeConfig(fixture.path);
+      assert.deepEqual(config.telegram.allowed_user_ids, []);
+      assert.deepEqual(config.telegram.chat_ids, ['-100123', '-100456']);
+      assert.equal(config.runtime.mode, 'live');
+    }
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});
+
+void test('YAML administrators default to empty and reject invalid configured identities', async () => {
+  for (const replacement of ['', 'allowed_user_ids: [],']) {
+    const fixture = await configFile(validYaml.replace('allowed_user_ids: ["2"],', replacement));
+    try {
+      assert.deepEqual(
+        (await loadRuntimeConfig(fixture.path)).config.telegram.allowed_user_ids,
+        []
+      );
+    } finally {
+      await rm(fixture.directory, { recursive: true, force: true });
+    }
+  }
+  const fixture = await configFile(
+    validYaml.replace('allowed_user_ids: ["2"]', 'allowed_user_ids: ["-2"]')
+  );
+  try {
+    await assert.rejects(loadRuntimeConfig(fixture.path), /allowed_user_ids/);
+  } finally {
+    await rm(fixture.directory, { recursive: true, force: true });
+  }
+});

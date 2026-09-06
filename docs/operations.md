@@ -5,10 +5,15 @@
 On SEA, the repository and both runtime files live in `/www/wwwroot/0xbsc`:
 
 - `config.yaml`: copy of the checked-in `config.example.yaml`, holding strategy settings.
-- `.env`: copy of `.env.example`, holding six operator-filled fields. Never commit the actual file.
+- `.env`: copy of `.env.example`, holding runtime credentials and an optional administrator list. Never commit the actual file.
 
 Fill `GMGN_API_KEY`, `GMGN_QUOTE_WALLET` (a public BSC address), `TELEGRAM_BOT_TOKEN`,
-`TELEGRAM_CHAT_IDS`, and `TELEGRAM_ALLOWED_USER_IDS`. Use comma-separated numeric IDs for lists.
+and `TELEGRAM_CHAT_IDS`. Use comma-separated numeric IDs for lists.
+`TELEGRAM_ALLOWED_USER_IDS` is optional and identifies administrators for privileged management
+actions. Empty or omitted means no administrators; it does not restrict signal delivery or GMGN
+link clicks. Everyone can use the GMGN link button and the native contract-copy control.
+The current release retains legacy management callbacks but does not implement shortcut commands.
+Future management commands must use the administrator policy, never a public-link permission check.
 `RUNTIME_MODE=live` enables formal delivery; `dry_run` runs without formal notifications.
 Do not put signing keys or seed phrases in either file. Quote values containing `#` or spaces.
 The application reads the file as data and does not expand shell variables or execute expressions.
