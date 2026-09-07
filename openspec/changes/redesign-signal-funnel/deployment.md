@@ -1,5 +1,16 @@
 # SEA 部署验收（2026-09-07 UTC）
 
+## 最新追加部署
+
+- 应用代码：`efa5e79be548350a35eea5ce721a9765a91fde47`，已按本地→GitHub→SEA拉取→Compose构建部署完成；Node24本地315/315测试及镜像内CI通过。
+- 容器：`ce84419bb97a`，healthy；容器 `.Image`：`sha256:1e13eeecd47ddd00cb20592f37c37ce998f0ea98ddd4da7f9d605e337180ed6c`；登记镜像 `bsc-meme-signal-bot:research-compat-efa5e79`。
+- 实测时刻 `1788801570011`：live + observe，正式配置revision未改变，researchInFlight=0、pendingWrites=0、stoppedReason=null。
+- 事实3,631份，候选母集1,003个；SENT17、SEND_FAILED50；近2min记录57次API请求，全部200/success。该短窗口跨越重启，仅用于运维核验。
+- 当前完成18/39项，21项未完成。新增分轨测量报告与CENSORED分类修复；新模型仍未启用，市场主基准UNAVAILABLE，最终run尚未开始。剩余工程与数据限制见implementation.md及measurement-feasibility.md。
+- 本批无schema迁移，保留原SEA数据库和此前兼容镜像；没有传输凭据或测试发信。后续纯文档提交不改变此应用构建。
+
+## 前次部署记录
+
 应用代码提交：`33315d358c05c8178be85ff6d8b45841d794810d`。后续验收文档提交不改变该应用构建；同步文档时核对应用文件无差异，不重复重启。
 
 - 路径：`/www/wwwroot/0xbsc`；GitHub：`bitwaters/0xbsc`，main。
@@ -21,6 +32,6 @@
 
 ## 提案未完成
 
-当前17/39项完成。新市场主基准仍UNAVAILABLE / PRICE_SOURCE_TIME_UNVERIFIED，新模型未完成选择及独立验收，未切换正式规则。真实配对采集、完整新publisher与执行编排、全链路负载证据、最终run/晋级凭据等工程仍未全部完成，不能把它们一概描述为仅等待30天数据。
+前次核验时17/39项完成（最新进度见文首）。新市场主基准仍UNAVAILABLE / PRICE_SOURCE_TIME_UNVERIFIED，新模型未完成选择及独立验收，未切换正式规则。真实配对采集、完整新publisher与执行编排、全链路负载证据、最终run/晋级凭据等工程仍未全部完成，不能把它们一概描述为仅等待30天数据。
 
 如仅需关闭被动记录，可在SEA项目目录执行 `RESEARCH_MODE=off docker compose up -d --no-build`，保留兼容镜像、现有数据和发送锁。代码问题继续在本地修复后推送部署，不直接修改服务器源码。
