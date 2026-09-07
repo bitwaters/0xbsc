@@ -5,6 +5,7 @@ export interface LimiterState {
   blockedUntilMs: number;
   nextDispatchAtMs: number;
   channelNextAtMs?: Record<string, number>;
+  channelBackoffMs?: Record<string, number>;
 }
 /** Contains no credential. Atomic replacement preserves cooldown and pacing across restarts. */
 export class LimiterStateFile {
@@ -27,6 +28,17 @@ export class LimiterStateFile {
       !Number.isFinite(value.nextDispatchAtMs)
     )
       throw new Error('Invalid persisted GMGN limiter state');
+    const backoff = value.channelBackoffMs;
+    if (
+      backoff !== undefined &&
+      (!backoff ||
+        typeof backoff !== 'object' ||
+        Array.isArray(backoff) ||
+        Object.values(backoff).some(
+          (v) => typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 3000
+        ))
+    )
+      throw new Error('Invalid persisted GMGN channel backoff');
     const channels = value.channelNextAtMs;
     if (
       channels !== undefined &&
@@ -38,7 +50,8 @@ export class LimiterStateFile {
     return {
       blockedUntilMs: value.blockedUntilMs,
       nextDispatchAtMs: value.nextDispatchAtMs,
-      ...(channels ? { channelNextAtMs: channels as Record<string, number> } : {})
+      ...(channels ? { channelNextAtMs: channels as Record<string, number> } : {}),
+      ...(backoff ? { channelBackoffMs: backoff as Record<string, number> } : {})
     };
   }
   save(value: LimiterState): void {

@@ -15,6 +15,7 @@ export interface RuntimeConfig {
       burst_reserve_weight: number;
       max_in_flight?: number;
       quote_min_interval_ms?: number;
+      quote_completion_gap_ms?: number;
       missing_reset_delay_seconds?: number;
     };
     endpoint_weights: Record<string, number>;

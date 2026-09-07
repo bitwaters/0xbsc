@@ -85,7 +85,7 @@ void test('rejects concentrated holders, direct creator holdings, coordinated re
           }
         }
       },
-      'concentrated_holdings_unverified'
+      'holders_single_wallet_limit'
     ],
     ['creator_hold', {}, 'creator_direct_hold_unverified'],
     [
@@ -124,7 +124,7 @@ void test('rejects concentrated holders, direct creator holdings, coordinated re
     [
       'drift',
       { holders: { data: { list: [{ address: '0xpool', amount_percentage: 80 }] } } },
-      'concentrated_holdings_unverified'
+      'holders_wallets_missing'
     ]
   ];
   for (const [name, overrides, reason] of cases) {

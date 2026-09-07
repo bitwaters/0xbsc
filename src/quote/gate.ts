@@ -118,21 +118,22 @@ function requestedSlippageRate(percent: string): Decimal {
 
 export async function quoteConfiguredPositions(
   provider: QuoteProvider,
-  sizesUsd: readonly [number, number, number]
+  sizesUsd: readonly number[]
 ): Promise<BidirectionalQuote[]> {
-  const buys = await Promise.all(sizesUsd.map((sizeUsd) => provider.buy(sizeUsd)));
-  const amounts = buys.map((buy) => {
+  const results = new Map<number, BidirectionalQuote>();
+  // Complete each round trip together; keep the mandatory 10U gate closest to delivery.
+  for (const sizeUsd of [
+    ...sizesUsd.filter((size) => size !== 10),
+    ...sizesUsd.filter((size) => size === 10)
+  ]) {
+    const buy = await provider.buy(sizeUsd);
     const amount = new Decimal(buy.outputTokenAmount);
     if (!amount.isFinite() || amount.lte(0))
       throw new RangeError('buy Quote token amount must be positive');
-    return amount.toFixed();
-  });
-  const sells = await Promise.all(amounts.map((amount) => provider.sell(amount)));
-  return sizesUsd.map((sizeUsd, index) => ({
-    sizeUsd,
-    buy: buys[index]!,
-    sell: sells[index]!
-  }));
+    const sell = await provider.sell(amount.toFixed());
+    results.set(sizeUsd, { sizeUsd, buy, sell });
+  }
+  return sizesUsd.map((size) => results.get(size)!);
 }
 
 export function decidePositions(decisions: TierDecision[]): {

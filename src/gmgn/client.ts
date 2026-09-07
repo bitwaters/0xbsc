@@ -228,6 +228,7 @@ export class GmgnClient {
       ) as unknown as RateLimitInfo;
       const retryAtMs = rateLimit.retryAtMs;
       this.#cooldownUntilMs = Math.max(this.cooldownUntilMs, retryAtMs);
+      if (apiMetricEndpoint(input.path) === 'quote') this.options.scheduler?.noteRateLimit('quote');
       this.options.scheduler?.pause(this.#cooldownUntilMs);
       observe(response.status, 'rate_limit', JSON.stringify(rateLimit));
       throw new GmgnError(

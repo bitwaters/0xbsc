@@ -17,7 +17,7 @@ const policy = (sizeUsd: number) => ({
   maxSlippage: 0.05
 });
 
-void test('quotes every configured buy position then sells its exact arbitrary-precision amount', async () => {
+void test('quotes matching round trips with 10U last and preserves exact arbitrary-precision sell amounts', async () => {
   const sellAmounts: string[] = [];
   const quoted = await quoteConfiguredPositions(
     {
@@ -50,9 +50,9 @@ void test('quotes every configured buy position then sells its exact arbitrary-p
     [10, 50, 100]
   );
   assert.deepEqual(sellAmounts, [
-    '10.123456789012345678901',
     '50.123456789012345678901',
-    '100.123456789012345678901'
+    '100.123456789012345678901',
+    '10.123456789012345678901'
   ]);
 });
 

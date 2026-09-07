@@ -79,6 +79,7 @@ export interface SchedulerPolicy {
   paced?: boolean;
   maxConcurrent?: number;
   channelIntervalsMs?: Record<string, number>;
+  channelCompletionIntervalsMs?: Record<string, number>;
   initialState?: LimiterState;
   persistState?: (state: LimiterState) => void;
 }
@@ -90,7 +91,9 @@ export class GmgnScheduler {
   #logicalKeys = new Set<string>();
   #channels = new Set<string>();
   #channelNextAtMs: Record<string, number> = {};
+  #channelBackoffMs: Record<string, number> = {};
   #draining = false;
+  #persistenceError: Error | null = null;
   #inFlight = 0;
   #blockedUntilMs = 0;
   #nextDispatchAtMs = 0;
@@ -117,6 +120,21 @@ export class GmgnScheduler {
     this.#nextDispatchAtMs = policy.initialState?.nextDispatchAtMs ?? 0;
     this.#probeRequired = Boolean(policy.paced);
     this.#channelNextAtMs = { ...policy.initialState?.channelNextAtMs };
+    this.#channelBackoffMs = { ...policy.initialState?.channelBackoffMs };
+  }
+  noteRateLimit(channel: string): void {
+    const base = this.policy.channelCompletionIntervalsMs?.[channel];
+    if (base === undefined) return;
+    this.#channelBackoffMs[channel] = Math.min(
+      3000,
+      Math.max(base, this.#channelBackoffMs[channel] ?? base) * 2
+    );
+  }
+  private completionGap(channel: string): number {
+    return Math.max(
+      this.policy.channelCompletionIntervalsMs?.[channel] ?? 0,
+      this.#channelBackoffMs[channel] ?? 0
+    );
   }
   get cooldownUntilMs(): number {
     return this.#blockedUntilMs;
@@ -125,10 +143,14 @@ export class GmgnScheduler {
     this.prune();
     return {
       queued: this.#queue.length,
+      ...(this.#persistenceError ? { persistenceFailed: true } : {}),
       inFlight: this.#inFlight,
       cooldownUntilMs: this.#blockedUntilMs,
       probeRequired: this.#probeRequired,
-      lastSecondWeight: this.#recent.reduce((sum, x) => sum + x.weight, 0)
+      lastSecondWeight: this.#recent.reduce((sum, x) => sum + x.weight, 0),
+      ...(this.policy.channelCompletionIntervalsMs?.quote === undefined
+        ? {}
+        : { quoteCompletionGapMs: this.completionGap('quote') })
     };
   }
   pause(untilMs: number): void {
@@ -171,6 +193,7 @@ export class GmgnScheduler {
     }
   }
   schedule<T>(task: ScheduledTask<T>): Promise<T> {
+    if (this.#persistenceError) return Promise.reject(this.#persistenceError);
     if (
       !Number.isFinite(task.weight) ||
       task.weight <= 0 ||
@@ -202,7 +225,10 @@ export class GmgnScheduler {
     this.policy.persistState?.({
       blockedUntilMs: this.#blockedUntilMs,
       nextDispatchAtMs: this.#nextDispatchAtMs,
-      channelNextAtMs: this.#channelNextAtMs
+      channelNextAtMs: this.#channelNextAtMs,
+      ...(Object.keys(this.#channelBackoffMs).length
+        ? { channelBackoffMs: this.#channelBackoffMs }
+        : {})
     });
   }
   private prune(): void {
@@ -213,6 +239,13 @@ export class GmgnScheduler {
     this.#draining = true;
     try {
       while (this.#queue.length) {
+        if (this.#persistenceError) {
+          for (const item of this.#queue.splice(0)) {
+            if (item.task.key) this.#scheduledKeys.delete(item.task.key);
+            item.reject(this.#persistenceError);
+          }
+          break;
+        }
         const now = this.clock.now();
         // Expire all queued work, including requests behind a busy endpoint channel.
         for (const item of [...this.#queue]) {
@@ -282,7 +315,11 @@ export class GmgnScheduler {
             now + Math.ceil((task.weight / this.bucket.softPerSecond) * 1000);
           if (task.channel)
             this.#channelNextAtMs[task.channel] =
-              now + (this.policy.channelIntervalsMs?.[task.channel] ?? 0);
+              now +
+              Math.max(
+                this.policy.channelIntervalsMs?.[task.channel] ?? 0,
+                this.completionGap(task.channel)
+              );
           this.persist();
         } catch (error) {
           if (task.key) this.#scheduledKeys.delete(task.key);
@@ -318,7 +355,25 @@ export class GmgnScheduler {
           )
           .finally(() => {
             this.#inFlight--;
-            if (task.channel) this.#channels.delete(task.channel);
+            if (task.channel) {
+              const gap = this.completionGap(task.channel);
+              if (gap > 0) {
+                this.#channelNextAtMs[task.channel] = Math.max(
+                  this.#channelNextAtMs[task.channel] ?? 0,
+                  this.clock.now() + gap,
+                  this.#blockedUntilMs + gap
+                );
+                // Admission also persists before dispatch; a failed completion save cannot send a request.
+                try {
+                  this.persist();
+                } catch {
+                  this.#persistenceError = new Error(
+                    'GMGN limiter completion persistence failed; restart after repairing state storage'
+                  );
+                }
+              }
+              this.#channels.delete(task.channel);
+            }
             if (task.key) this.#scheduledKeys.delete(task.key);
             void this.drain();
           });

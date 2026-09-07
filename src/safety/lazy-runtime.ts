@@ -1,3 +1,4 @@
+import { assessHolders } from './holders.js';
 import type { RuntimeConfig } from '../config/types.js';
 import type { CandidateGmgnApi } from '../gmgn/api.js';
 import { assessCoordinatedExit, type TraderSnapshot } from './coordinated-exit.js';
@@ -89,32 +90,7 @@ export class LazySafetyRuntime {
   }
 
   private holders(value: unknown, info: unknown): LazyDeepSafetyData['holders'] {
-    const list = rows(value);
-    const data = nested(info, 'data') ?? record(info);
-    const pool = nested(data, 'pool');
-    const poolAddresses = new Set(
-      [data?.pool_address, data?.biggest_pool_address, pool?.address, pool?.pool_address]
-        .map(text)
-        .filter((item): item is string => item !== null)
-    );
-    if (!list || poolAddresses.size === 0) return { concentratedHoldings: true };
-    let suspicious = 0;
-    for (const holder of list) {
-      const address = text(holder.address);
-      const holding = rate(holder.amount_percentage, 'holder.amount_percentage');
-      if (!address || holding === null || typeof holder.is_suspicious !== 'boolean')
-        return { concentratedHoldings: true };
-      if (
-        !poolAddresses.has(address) &&
-        holding > this.config.security.lazy_deep.max_single_non_pool_holder_percent
-      )
-        return { concentratedHoldings: true };
-      if (holder.is_suspicious) suspicious += holding;
-    }
-    return {
-      concentratedHoldings:
-        suspicious > this.config.security.lazy_deep.max_suspicious_holder_percent
-    };
+    return assessHolders(value, info, this.config.security.lazy_deep);
   }
 
   private traders(tokenAddress: string, value: unknown): LazyDeepSafetyData['traders'] {

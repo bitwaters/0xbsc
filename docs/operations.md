@@ -114,3 +114,16 @@ rows cannot be updated or deleted. A null link on an older signal means the orig
 message was not captured; it does not mean its frozen price is missing. Never reconstruct
 that historical message with later market data. Follow-up results remain in the backend
 and reports; this release adds no new automatic Telegram result or risk messages.
+
+## Quote freshness and cancelled-candidate re-entry (2026-09-07)
+
+See [repair details](no-signal-repair-2026-09-07.md). No schema migration is added.
+Old configs default `gmgn.rate_limit.quote_completion_gap_ms` to 1000ms without
+editing operator credentials. Persisted Quote backoff survives restart and is capped at
+3000ms; global reset waits still apply. Do not remove limiter state to evade cooldown.
+
+Verify physical Quote attempts, 429s, completion-to-next-dispatch spacing, scheduler
+`quoteCompletionGapMs`, and new `holders_*` rejection reasons. A healthy process or zero
+Quote attempts is not evidence that delivery works. Only fresh independent triggers can
+re-enter after a proven unattempted pre-send cancellation; old outbox rows stay terminal.
+Retain the previous image, database and limiter state together for rollback.

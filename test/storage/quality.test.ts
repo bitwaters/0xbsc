@@ -19,6 +19,69 @@ async function seed(storage: Storage) {
     nowMs: 1000
   });
 }
+void test('only an unattempted pre-send cancellation may re-enter on a fresh independent trigger', async () => {
+  for (const priorAttempt of [false, true]) {
+    const storage = await Storage.open(':memory:');
+    try {
+      await seed(storage);
+      await storage.recordEpisodeDecision({
+        episodeId: 'ep',
+        decision: 'formal',
+        score: 90,
+        completeness: 1,
+        decisiveTriggerAtMs: 1000,
+        featureSnapshot: {},
+        nowMs: 1000
+      });
+      await storage.createSignalOutbox({
+        signalId: 'sig',
+        episodeId: 'ep',
+        configRevisionId: 'cfg',
+        quoteSnapshot: {},
+        decision: {},
+        nowMs: 1000
+      });
+      if (priorAttempt)
+        storage.db
+          .prepare('UPDATE signals SET delivery_attempted_at_ms=1500 WHERE id=?')
+          .run('sig');
+      await storage.recordPreSendCancellation('sig', 'pre_send_buy_pressure_lost', 2000);
+      const input = {
+        id: 'next',
+        tokenAddress: '0xq',
+        route: 'new_launch' as const,
+        configRevisionId: 'cfg',
+        nowMs: 3000,
+        triggerAtMs: 2500,
+        decisiveWindowMs: 1000,
+        resetSatisfied: true
+      };
+      assert.equal(
+        await storage.claimEpisode({ ...input, triggerAtMs: 2000 }),
+        'reentry_not_allowed'
+      );
+      assert.equal(
+        await storage.claimEpisode({ ...input, resetSatisfied: false }),
+        'reentry_not_allowed'
+      );
+      assert.equal(
+        await storage.claimEpisode(input),
+        priorAttempt ? 'reentry_not_allowed' : 'created'
+      );
+      assert.equal((await storage.pendingOutboxSignals(10_000)).length, 0);
+      assert.equal(
+        (
+          storage.db
+            .prepare("SELECT delivery_state AS state FROM signals WHERE id='sig'")
+            .get() as { state: string }
+        ).state,
+        'SEND_FAILED'
+      );
+    } finally {
+      storage.close();
+    }
+  }
+});
 void test('retry and safety rejection cannot move the frozen unsent entry or target', async () => {
   const storage = await Storage.open(':memory:');
   try {

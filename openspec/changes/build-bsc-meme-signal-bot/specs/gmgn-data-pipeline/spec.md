@@ -168,3 +168,8 @@ Market Signal MUST 显式携带类型并禁用生产接口拒绝的 Type 14/15/1
 
 - **WHEN** 隔离只读验收证明 Quote 在总权重未耗尽时仍触发限流
 - **THEN** 系统保留 Plus 总预算及 Quote 官方权重，另以唯一 YAML 中可审计的端点间隔控制发送节奏；其他接口不因 Quote 等待而被整条队列阻塞，不能跳过任一买卖报价腿
+
+#### Scenario: A slow Quote or repeated rate limit needs completion-based spacing
+
+- **WHEN** Quote 完成或返回 429
+- **THEN** 下一次 Quote 至少等待配置的完成后间隔，默认 1000ms；429 将间隔增至 2000/3000ms 并与全局 reset 冷却叠加，持久化后重启仍生效；其他接口成功不能提前解除该间隔

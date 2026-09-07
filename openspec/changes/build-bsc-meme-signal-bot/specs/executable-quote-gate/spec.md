@@ -6,7 +6,7 @@
 
 ### Requirement: Each configured position is quoted in both directions
 
-系统 SHALL 先并行取得 10U、50U、100U 的买入 Quote，再把每笔实际买到的代币数量分别并行取得完整卖出 Quote。不得用一个仓位替代另一仓位，也不得仅凭买入 Quote 推断可卖性。
+系统 SHALL 逐档取得买入 Quote 后立即以该笔实际代币数量取得完整卖出 Quote，完整验证顺序为 50U、100U、10U。不得用一个仓位替代另一仓位，也不得仅凭买入 Quote 推断可卖性。只有 30 秒内完整三档曾通过且市场未实质变化时，最终新鲜度复核 MAY 仅刷新 10U 双向报价；失败、完整批准过期、市场变化或重启后 MUST 重做三档。仅刷新 10U 不得延长完整批准期限。
 
 #### Scenario: Buy route exists but reverse route fails
 
@@ -38,7 +38,7 @@
 
 ### Requirement: Delivery uses fresh security and quote data
 
-写入正式投递前，Security 和 Pool 数据 MUST 不超过 30 秒，Quote MUST 不超过 5 秒；Quote 年龄 SHALL 从最旧有效报价腿的实际请求时刻计算，每腿分别保存请求与完成时间；整组完成时间不得刷新较早报价的年龄。系统 SHALL 在有界刷新循环中只刷新当前陈旧的组件，任何刷新后的安全失败 SHALL 拒绝投递。
+写入正式投递前，Security 和 Pool 数据 MUST 不超过 30 秒，必需的 10U Quote MUST 不超过 5 秒；Quote 年龄 SHALL 从 10U 买卖两腿最旧的实际请求时刻计算，每腿分别保存请求与完成时间；整组完成时间不得刷新较早报价的年龄。过期的 50U/100U 档位 MUST NOT 计入当前最大安全容量。系统 SHALL 在有界刷新循环中只刷新当前陈旧的组件，任何刷新后的安全失败 SHALL 拒绝投递。
 
 #### Scenario: Quote expires while delivery decision is pending
 
@@ -53,3 +53,8 @@
 
 - **WHEN** 三个仓位同时申请 Quote，其中一个请求失败
 - **THEN** 实际 Quote 调用不重叠，失败向调用方传播，后续请求仍通过调度器和冷却检查执行
+
+#### Scenario: Full validation takes longer than the quote freshness limit
+
+- **WHEN** 较早的额外档位已过期，但最后执行的 10U 双向报价仍新鲜且完整三档路由验证通过
+- **THEN** 系统仅报告仍新鲜且通过的容量，保留最早请求时刻；10U 也过期时必须刷新或拒绝

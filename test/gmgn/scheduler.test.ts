@@ -3,6 +3,7 @@ import test from 'node:test';
 import { GmgnClient, GmgnError } from '../../src/gmgn/client.js';
 import { GmgnApi, ScheduledCandidateGmgnApi } from '../../src/gmgn/api.js';
 import { GmgnScheduler, WeightedTokenBucket, type Clock } from '../../src/gmgn/scheduler.js';
+import type { LimiterState } from '../../src/gmgn/limiter-state.js';
 
 class FakeClock implements Clock {
   value = 0;
@@ -17,6 +18,131 @@ class FakeClock implements Clock {
     return 0.5;
   }
 }
+
+void test('Quote spacing starts after completion and remains separate from other endpoint work', async () => {
+  const clock = new FakeClock();
+  const scheduler = new GmgnScheduler(clock, 14, 20, 0, {
+    channelCompletionIntervalsMs: { quote: 1000 }
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const starts: number[] = [];
+  const first = scheduler.schedule({
+    weight: 2,
+    priority: 'formal',
+    channel: 'quote',
+    run: async () => {
+      starts.push(clock.now());
+      await gate;
+      clock.value = 800;
+    }
+  });
+  const second = scheduler.schedule({
+    weight: 2,
+    priority: 'formal',
+    channel: 'quote',
+    run: () => {
+      starts.push(clock.now());
+      return Promise.resolve();
+    }
+  });
+  let infoAt: number | null = null;
+  await scheduler.schedule({
+    weight: 1,
+    priority: 'candidate',
+    run: () => {
+      infoAt = clock.now();
+      return Promise.resolve();
+    }
+  });
+  assert.equal(infoAt, 0);
+  assert.deepEqual(starts, [0]);
+  release();
+  await Promise.all([first, second]);
+  assert.deepEqual(starts, [0, 1800]);
+});
+
+void test('Quote 429 persists adaptive spacing and cannot resume until reset plus the completion gap', async () => {
+  const clock = new FakeClock();
+  let state: LimiterState | undefined;
+  const policy = {
+    channelCompletionIntervalsMs: { quote: 1000 },
+    persistState: (value: LimiterState) => {
+      state = structuredClone(value);
+    }
+  };
+  const scheduler = new GmgnScheduler(clock, 14, 20, 0, policy);
+  await assert.rejects(
+    scheduler.schedule({
+      weight: 2,
+      priority: 'formal',
+      channel: 'quote',
+      run: () => {
+        clock.value = 300;
+        scheduler.noteRateLimit('quote');
+        scheduler.pause(5000);
+        return Promise.reject(new Error('429'));
+      }
+    }),
+    /429/
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(state?.channelBackoffMs?.quote, 2000);
+  assert.equal(state?.channelNextAtMs?.quote, 7000);
+  const restarted = new GmgnScheduler(clock, 14, 20, 0, { ...policy, initialState: state });
+  await assert.rejects(
+    restarted.schedule({
+      weight: 2,
+      priority: 'formal',
+      channel: 'quote',
+      run: () => Promise.resolve()
+    }),
+    /cooling down/
+  );
+  clock.value = 5000;
+  let dispatched = 0;
+  await restarted.schedule({
+    weight: 2,
+    priority: 'formal',
+    channel: 'quote',
+    run: () => {
+      dispatched = clock.now();
+      return Promise.resolve();
+    }
+  });
+  assert.equal(dispatched, 7000);
+  restarted.noteRateLimit('quote');
+  restarted.noteRateLimit('quote');
+  assert.equal(restarted.snapshot().quoteCompletionGapMs, 3000);
+});
+
+void test('a completion persistence failure stops further network work with an observable error', async () => {
+  const clock = new FakeClock();
+  let saves = 0;
+  const scheduler = new GmgnScheduler(clock, 14, 20, 0, {
+    channelCompletionIntervalsMs: { quote: 1000 },
+    persistState: () => {
+      if (++saves > 1) throw new Error('disk full');
+    }
+  });
+  let requests = 0;
+  const task = {
+    weight: 2,
+    priority: 'formal' as const,
+    channel: 'quote',
+    run: () => {
+      requests++;
+      return Promise.resolve();
+    }
+  };
+  await scheduler.schedule(task);
+  await new Promise((resolve) => setImmediate(resolve));
+  await assert.rejects(scheduler.schedule(task), /completion persistence failed/);
+  assert.equal(requests, 1);
+  assert.equal(scheduler.snapshot().persistenceFailed, true);
+});
 
 void test('refills weighted tokens at the soft limit and caps burst at the hard limit', () => {
   const bucket = new WeightedTokenBucket(14, 20, 0);

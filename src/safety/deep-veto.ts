@@ -1,5 +1,5 @@
 export interface LazyDeepSafetyData {
-  holders: { concentratedHoldings?: unknown };
+  holders: { concentratedHoldings?: unknown; reason?: string | null; diagnostics?: unknown };
   traders: { coordinatedSmartMoneyExit?: unknown; reason?: string };
   createdTokens: {
     creatorDirectHoldUnsafe?: unknown;
@@ -25,6 +25,7 @@ export interface LazyDeepVetoResult {
   reason: string | null;
   fetched: boolean;
   creatorHistory: CreatorHistoryAssessment | null;
+  holderDiagnostics?: unknown;
 }
 
 export async function evaluateLazyDeepVeto(
@@ -67,7 +68,10 @@ export async function evaluateLazyDeepVeto(
   if (data.holders.concentratedHoldings !== false)
     return {
       allowed: false,
-      reason: 'concentrated_holdings_unverified',
+      reason: data.holders.reason ?? 'concentrated_holdings_unverified',
+      ...(data.holders.diagnostics === undefined
+        ? {}
+        : { holderDiagnostics: data.holders.diagnostics }),
       fetched: true,
       creatorHistory
     };

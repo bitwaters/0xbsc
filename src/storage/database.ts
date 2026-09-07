@@ -258,13 +258,25 @@ export class Storage {
       }
       const previous = this.db
         .prepare(
-          `SELECT state, ended_at_ms AS endedAtMs, rejection_reason AS rejectionReason FROM episodes
+          `SELECT id, state, ended_at_ms AS endedAtMs, rejection_reason AS rejectionReason FROM episodes
            WHERE chain = 'bsc' AND token_address = ? AND route = ? AND ended_at_ms IS NOT NULL
            ORDER BY ended_at_ms DESC, created_at_ms DESC LIMIT 1`
         )
         .get(input.tokenAddress.toLowerCase(), input.route) as
-        { state: string; endedAtMs: number; rejectionReason: string | null } | undefined;
+        | { id: string; state: string; endedAtMs: number; rejectionReason: string | null }
+        | undefined;
       if (previous) {
+        const safeCancellation =
+          previous.state === 'SEND_FAILED' &&
+          Boolean(
+            this.db
+              .prepare(
+                `SELECT 1 FROM signals s WHERE s.episode_id=? AND s.delivery_failure_kind='pre_send_cancelled'
+          AND s.delivery_attempted_at_ms IS NULL AND s.confirmed_snapshot_id IS NULL AND s.telegram_confirmed_at_ms IS NULL
+          AND NOT EXISTS(SELECT 1 FROM signal_delivery_snapshots ds WHERE ds.signal_id=s.id)`
+              )
+              .get(previous.id)
+          );
         const rejectionCooldownMs = previous.rejectionReason
           ? input.reentryCooldownMsByReason?.[previous.rejectionReason]
           : undefined;
@@ -281,7 +293,7 @@ export class Storage {
           input.triggerAtMs <= input.nowMs &&
           input.nowMs - input.triggerAtMs <= input.decisiveWindowMs;
         if (
-          !['REJECTED', 'EXPIRED'].includes(previous.state) ||
+          (!['REJECTED', 'EXPIRED'].includes(previous.state) && !safeCancellation) ||
           !freshTrigger ||
           input.resetSatisfied !== true
         )

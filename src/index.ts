@@ -10,14 +10,14 @@ import type { NormalizedEvent } from './discovery/events.js';
 import { GmgnApi, ScheduledCandidateGmgnApi } from './gmgn/api.js';
 import { GmgnClient, GmgnError, gmgnRetryDeadline } from './gmgn/client.js';
 import { GmgnScheduler, type Clock, type Priority } from './gmgn/scheduler.js';
-import { preSendRejection } from './decision/pre-send.js';
+import { preSendMarketRejection, preSendRejection } from './decision/pre-send.js';
 import { runCandidateScope } from './decision/candidate-scope.js';
 import { ShadowEvaluator } from './decision/shadow.js';
 import { RouteRuntime } from './decision/runtime.js';
 import { staggeredEvaluationAtMs } from './decision/episode-policy.js';
 import { episodeExpiryAtMs } from './decision/episode-policy.js';
 import { routeResetSatisfied } from './decision/episode.js';
-import { QuoteGateRuntime } from './quote/runtime.js';
+import { freshQuoteCapacity, QuoteGateRuntime } from './quote/runtime.js';
 import { finalFreshnessDecision, quoteAllowsDelivery } from './quote/gate.js';
 import { SafetyRuntime } from './safety/runtime.js';
 import { LazySafetyRuntime } from './safety/lazy-runtime.js';
@@ -73,6 +73,9 @@ const scheduler = new GmgnScheduler(
     paced: true,
     maxConcurrent: loaded.config.gmgn.rate_limit.max_in_flight ?? 4,
     channelIntervalsMs: { quote: loaded.config.gmgn.rate_limit.quote_min_interval_ms ?? 600 },
+    channelCompletionIntervalsMs: {
+      quote: loaded.config.gmgn.rate_limit.quote_completion_gap_ms ?? 1000
+    },
     initialState: limiterState.read(),
     persistState: (state) => limiterState.save(state)
   }
@@ -340,6 +343,20 @@ const processCandidate = (
                   loaded.config.scoring.data_ttl_seconds.traders * 1_000,
                 concentrated_holdings_unverified:
                   loaded.config.scoring.data_ttl_seconds.holders * 1_000,
+                ...Object.fromEntries(
+                  [
+                    'holders_list_invalid',
+                    'holders_list_empty',
+                    'holders_duplicate_address',
+                    'holders_wallets_missing',
+                    'holders_pool_identity_missing',
+                    'holders_address_missing',
+                    'holders_share_invalid',
+                    'holders_suspicious_flag_missing',
+                    'holders_single_wallet_limit',
+                    'holders_suspicious_total_limit'
+                  ].map((reason) => [reason, loaded.config.scoring.data_ttl_seconds.holders * 1000])
+                ),
                 creator_direct_hold_unverified:
                   loaded.config.scoring.data_ttl_seconds.creator * 1_000,
                 creator_history_unverified: loaded.config.scoring.data_ttl_seconds.creator * 1_000,
@@ -427,7 +444,13 @@ const processCandidate = (
           evidence: evaluation?.evidence ?? [],
           creatorHistory: creatorScoreAdjustment,
           episodeAdmission: episode,
-          lazySafety: lazyGate ? { allowed: lazyGate.allowed, reason: lazyGate.reason } : null
+          lazySafety: lazyGate
+            ? {
+                allowed: lazyGate.allowed,
+                reason: lazyGate.reason,
+                holderDiagnostics: lazyGate.holderDiagnostics
+              }
+            : null
         });
         if (
           activeEpisodeId &&
@@ -1074,10 +1097,24 @@ async function refreshPendingSignalMarket(
   const features = asRecord(decision.features);
   let currentMarket = marketFromPresentation(presentation, features);
   const previousMarket = marketFromPresentation(previousPresentation, features);
+  const earlyRejection = preSendMarketRejection({
+    info,
+    expectedPrice: optionalNumber(features.priceUsd) ?? null,
+    supportPrice: optionalNumber(features.supportPriceUsd) ?? null,
+    maxRetrace: loaded.config.strategy.pullback_max_retrace_rate,
+    nowMs: clock.now(),
+    triggerAtMs,
+    triggerMaxAgeMs: loaded.config.scoring.decisive_trigger_seconds[route] * 1000
+  });
+  if (earlyRejection) {
+    await storage.recordPreSendCancellation(signal.id, earlyRejection, clock.now());
+    return null;
+  }
   const previousQuote = asRecord(signal.quoteSnapshot);
   const quotedAtMs = optionalNumber(previousQuote.quotedAtMs);
   const quoteExpired =
-    quotedAtMs === undefined || nowMs - quotedAtMs > loaded.config.quote.max_age_seconds * 1_000;
+    quotedAtMs === undefined ||
+    clock.now() - quotedAtMs > loaded.config.quote.max_age_seconds * 1_000;
   const marketChanged = materiallyChanged(previousMarket, currentMarket);
 
   let quoteSnapshot: unknown = undefined;
@@ -1090,7 +1127,7 @@ async function refreshPendingSignalMarket(
             priceUsd: Number(currentMarket.priceUsd),
             liquidityUsd: Number(currentMarket.liquidityUsd)
           },
-      { force: true }
+      { force: true, full: marketChanged }
     );
     if (!asRecord(quoteSnapshot).accepted) {
       await storage.recordPreSendCancellation(signal.id, 'pre_send_quote_rejected', clock.now());
@@ -1110,7 +1147,7 @@ async function refreshPendingSignalMarket(
               priceUsd: Number(currentMarket.priceUsd),
               liquidityUsd: Number(currentMarket.liquidityUsd)
             },
-        { force: true }
+        { force: true, full: true }
       );
       if (!asRecord(quoteSnapshot).accepted) {
         await storage.recordPreSendCancellation(signal.id, 'pre_send_quote_rejected', clock.now());
@@ -1139,6 +1176,14 @@ async function refreshPendingSignalMarket(
     await storage.recordPreSendCancellation(signal.id, rejection, clock.now());
     return null;
   }
+  quoteSnapshot = {
+    ...finalQuote,
+    maxSafePosition: freshQuoteCapacity(
+      finalQuote,
+      clock.now(),
+      loaded.config.quote.max_age_seconds * 1000
+    )
+  };
   return storage.updatePendingSignalMarket(signal.id, presentation, quoteSnapshot, fetchedAtMs);
 }
 

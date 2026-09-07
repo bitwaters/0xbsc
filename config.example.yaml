@@ -12,7 +12,8 @@ gmgn:
     soft_weight_per_second: 14
     burst_reserve_weight: 6
     max_in_flight: 4
-    quote_min_interval_ms: 600 # experimental pacing; upstream IP limiting remains unresolved
+    quote_min_interval_ms: 600
+    quote_completion_gap_ms: 1000 # response-to-next-request spacing; learned Quote backoff is persisted
     missing_reset_delay_seconds: 30
   endpoint_weights:
     trending: 1

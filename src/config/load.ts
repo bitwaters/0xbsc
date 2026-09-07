@@ -94,6 +94,7 @@ const runtimeConfigSchema = z
           burst_reserve_weight: z.number().min(0),
           max_in_flight: z.number().int().min(1).max(20).default(4),
           quote_min_interval_ms: z.number().int().min(0).max(5000).default(600),
+          quote_completion_gap_ms: z.number().int().min(1000).max(3000).default(1000),
           missing_reset_delay_seconds: z.number().min(30).max(300).default(30)
         }),
         endpoint_weights: endpointWeights

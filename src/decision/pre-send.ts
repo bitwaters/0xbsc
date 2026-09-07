@@ -1,5 +1,5 @@
 import { marketFlow } from './flow.js';
-export function preSendRejection(input: {
+interface PreSendMarketInput {
   info: unknown;
   expectedPrice: number | null;
   supportPrice: number | null;
@@ -7,11 +7,33 @@ export function preSendRejection(input: {
   nowMs: number;
   triggerAtMs: number;
   triggerMaxAgeMs: number;
-  securityStartedAtMs: number;
-  securityMaxAgeMs: number;
-  quoteAtMs: number | null;
-  quoteMaxAgeMs: number;
-}): string | null {
+}
+export function preSendRejection(
+  input: PreSendMarketInput & {
+    securityStartedAtMs: number;
+    securityMaxAgeMs: number;
+    quoteAtMs: number | null;
+    quoteMaxAgeMs: number;
+  }
+): string | null {
+  const marketRejection = preSendMarketRejection(input);
+  if (marketRejection) return marketRejection;
+  if (
+    input.nowMs < input.securityStartedAtMs ||
+    input.nowMs - input.securityStartedAtMs > input.securityMaxAgeMs
+  )
+    return 'pre_send_security_expired';
+  if (
+    input.quoteAtMs === null ||
+    input.nowMs < input.quoteAtMs ||
+    input.nowMs - input.quoteAtMs > input.quoteMaxAgeMs
+  )
+    return 'pre_send_quote_expired';
+  return null;
+}
+
+/** Cheap current-market guard before spending Quote requests; repeated after quoting. */
+export function preSendMarketRejection(input: PreSendMarketInput): string | null {
   const flow = marketFlow(input.info);
   if (
     flow.priceUsd === null ||
@@ -27,16 +49,5 @@ export function preSendRejection(input: {
     return 'pre_send_retrace_exceeded';
   if (input.nowMs < input.triggerAtMs || input.nowMs - input.triggerAtMs > input.triggerMaxAgeMs)
     return 'pre_send_trigger_expired';
-  if (
-    input.nowMs < input.securityStartedAtMs ||
-    input.nowMs - input.securityStartedAtMs > input.securityMaxAgeMs
-  )
-    return 'pre_send_security_expired';
-  if (
-    input.quoteAtMs === null ||
-    input.nowMs < input.quoteAtMs ||
-    input.nowMs - input.quoteAtMs > input.quoteMaxAgeMs
-  )
-    return 'pre_send_quote_expired';
   return null;
 }

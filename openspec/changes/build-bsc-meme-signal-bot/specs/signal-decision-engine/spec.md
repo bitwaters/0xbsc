@@ -232,6 +232,24 @@
 - **WHEN** 候选已经写入 READY，但 Quote 请求因 429 抛错
 - **THEN** 候选按冷却时间回到 OBSERVING，保留冻结入场与原观察终点，下一次必须重新通过行情、安全、新鲜度和 Quote 门槛
 
+### Requirement: Proven unattempted cancellations permit independent fresh opportunities
+
+旧发送前取消记录 SHALL 保持终态。只有 `pre_send_cancelled` 且无 Telegram 请求时间、发送快照、确认记录时，新的独立触发 MAY 建立新的 Episode。新触发 MUST 晚于旧周期结束、满足新鲜窗口及路线重置条件；实际尝试或发送结果未知的旧信号不得借此重复发送。
+
+#### Scenario: Buy pressure recovers after an unattempted cancellation
+
+- **WHEN** 买压丢失导致发送前取消，之后出现满足路线重置的新鲜独立触发
+- **THEN** 系统允许建立新候选重新经过全部安全和报价检查，旧信号保持取消且不可补发
+
+### Requirement: Holder vetoes preserve specific evidence quality reasons
+
+系统 SHALL 区分非池单钱包超限、可疑持仓累计超限、池身份缺失和响应字段不完整。已识别池合约 SHALL 在钱包标识检查前排除。缺失或重复钱包、没有非池钱包的列表仍 MUST 阻止正式发送，不能将未知解释为安全。
+
+#### Scenario: A known pool has no wallet suspicious flag
+
+- **WHEN** 池地址可识别、非池钱包字段完整，但池合约缺少钱包可疑标识
+- **THEN** 池合约不会造成钱包字段误判；非池钱包仍须通过原有集中度阈值
+
 #### Scenario: An orphan READY already exceeded its observation horizon
 
 - **WHEN** 重启或定时扫描遇到已到期 READY
