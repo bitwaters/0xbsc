@@ -106,6 +106,7 @@ Compose 显式启用 `RESEARCH_MODE=observe`，复用现有 GMGN 响应记录事
 npm run research -- audit --db /path/to/existing.sqlite --format markdown
 npm run research -- manifest validate --file model.json
 npm run research -- replay --file replay-input.json
+npm run research -- measurement-report --file measurement-ledger.json --format markdown
 npm run research -- budget-check
 npm run research -- readiness
 npm run research -- deployment-precheck --db /path/to/existing.sqlite
@@ -114,5 +115,7 @@ npm run research -- deployment-precheck --db /path/to/existing.sqlite
 `replay-input.json` 明确提供 models、facts、frames、events 和脱敏 legacyConfig。用 `--db` 时以 factIds 从只读数据库及同目录 research-archives 读取校验后的事实。所有决定只使用当时已返回的数据；离线输出标记安全/执行未评估。
 
 `dataset freeze --db DB --file PLAN` 会写入本机数据用途台账并固定 token 分组/截止/事实引用；不能在开发集、选择集和最终集间重用同一 token 的新池。`select --file CANDIDATES` 与 `evaluate-paired --file INPUT` 提供有限模型选择及成对统计。统计 PASS 不是晋级凭据；当前构建未开放 collect、execute_shadow 或 validated publisher。
+
+`measurement-report` 的输入分为 `expected` 注册样本和 `observations` 实际测量，类型见 `src/research/measurement-report.ts`。缺失测量仍进入全部分母；按 run、模型、轨道、协议、真实/模拟确认和观察上限分别输出四个目标的分类、条件率、全部率、覆盖、缺失成功区间及基准等待。重复样本、改变坐标或以无效基准声明成功会报错。报告是离线账本诊断，不验证输入的采集来源，也不生成晋级凭据。
 
 当前 Info 缺少已验证的价格来源时间，市场主基准报告 UNAVAILABLE。该版本提供测量与诊断工具，不能据此声称新规则已提高命中率。最终前向验证与正式切换仍须完成提案剩余任务。部署和回滚均保留服务器原数据库；开始新格式正式发布后，只能回到带 `org.0xbsc.publication-compatibility=global-token-lock-v1` 的已登记镜像。

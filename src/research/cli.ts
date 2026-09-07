@@ -14,6 +14,7 @@ import { hashValue } from './protocol.js';
 import type { MarketFact } from '../gmgn/facts.js';
 import { createHash } from 'node:crypto';
 import { budgetCheck } from './budget-check.js';
+import { measurementReport, measurementReportMarkdown } from './measurement-report.js';
 
 const args = process.argv.slice(2);
 const option = (name: string) => {
@@ -29,6 +30,12 @@ const file = () => {
 };
 const output = (value: unknown) => process.stdout.write(JSON.stringify(value, null, 2) + '\n');
 async function main() {
+  if (args[0] === 'measurement-report') {
+    const report = measurementReport(file());
+    if (option('--format') === 'markdown') process.stdout.write(measurementReportMarkdown(report));
+    else output(report);
+    return;
+  }
   if (args[0] === 'budget-check') {
     output(await budgetCheck());
     return;

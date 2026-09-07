@@ -59,7 +59,19 @@ void test('same candle, boundary, missing interval and conflicting observations 
     firstTouch(baseline, 1.3, [candle(1000, '1.30', '1.31', 86401000)], 86401000).outcome,
     'NOT_TOUCHED'
   );
-  assert.equal(firstTouch(baseline, 1.3, [], 86401000).outcome, 'UNKNOWN');
+  assert.equal(firstTouch(baseline, 1.3, [], 86401000).outcome, 'CENSORED');
+});
+void test('incomplete observation without a touch is censored, but a touch after a gap is unknown', () => {
+  const path = [candle(31000, '1.30', '1.31', 86401000)];
+  assert.equal(firstTouch(baseline, 1.3, path, 86401000).outcome, 'CENSORED');
+  assert.equal(
+    firstTouch(baseline, 1.3, [candle(31000, '1.30', '2', 86401000)], 86401000).outcome,
+    'UNKNOWN'
+  );
+  assert.equal(
+    firstTouch(baseline, 1.3, [candle(1000, '1.30', '1.31')], 86401000).outcome,
+    'CENSORED'
+  );
 });
 void test('unverified Info never falls back to the card; late physical response cannot reset baseline', () => {
   const f = createMarketFact({

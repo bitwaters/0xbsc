@@ -202,6 +202,7 @@ export function firstTouch(
     tp = price.times(target),
     sl = price.times(p.stopMultiple);
   let covered = start;
+  let incomplete = false;
   const rows = candles
     .filter(
       (c) => c.receivedAtMs <= nowMs && c.endMs > (baseline.sourceAtMs ?? start) && c.startMs < end
@@ -221,7 +222,12 @@ export function firstTouch(
   }
   for (const c of byStart.values()) {
     const values = [c.open, c.high, c.low, c.close].map(decimalValue);
-    if (values.some((v) => !v?.gt(0)) || c.endMs <= c.startMs || c.endMs > c.receivedAtMs)
+    if (
+      values.some((v) => !v?.gt(0)) ||
+      ![c.startMs, c.endMs, c.receivedAtMs].every(Number.isSafeInteger) ||
+      c.endMs <= c.startMs ||
+      c.endMs > c.receivedAtMs
+    )
       return result('UNKNOWN', 'INVALID_OR_INCOMPLETE_CANDLE');
     const [open, high, low, close] = values as Decimal[];
     if (low!.gt(Decimal.min(open!, close!)) || high!.lt(Decimal.max(open!, close!)))
@@ -233,16 +239,18 @@ export function firstTouch(
       if (c.startMs <= covered) covered = Math.min(end, Math.max(covered, c.endMs));
       continue;
     }
-    if (c.startMs > covered || c.startMs < covered) return result('UNKNOWN', 'PATH_GAP_OR_OVERLAP');
+    if (c.startMs < covered) return result('UNKNOWN', 'PATH_GAP_OR_OVERLAP');
+    if (c.startMs > covered) incomplete = true;
+    if (incomplete && (hitsTp || hitsSl)) return result('UNKNOWN', 'PATH_GAP_OR_OVERLAP');
     if (hitsTp && hitsSl) return result('UNKNOWN', 'SAME_CANDLE_ORDER');
     if (hitsSl) return result('SL', 'STOP_FIRST', c.endMs);
     if (hitsTp) return result('TP', 'TARGET_FIRST', c.endMs);
     covered = c.endMs;
   }
   if (nowMs < end) return result('CENSORED', 'HORIZON_PENDING');
-  return covered >= end
+  return covered >= end && !incomplete
     ? result('NOT_TOUCHED', 'COMPLETE_HORIZON_NO_TOUCH')
-    : result('UNKNOWN', 'PATH_INCOMPLETE');
+    : result('CENSORED', 'PATH_INCOMPLETE');
 }
 
 export function outcomeSummary(
