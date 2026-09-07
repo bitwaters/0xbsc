@@ -30,7 +30,7 @@
 
 SEA首轮核验发现发现类响应解包不全；已返回本地修复并增加回归测试，正式发现逻辑不变。Docker权限设置改为COPY --chown，避免复制后递归改依赖文件所有权。
 
-代码审查与修复见[code-review.md](code-review.md)。部署实测记录将在deployment.md中登记。
+代码审查与修复见[code-review.md](code-review.md)。部署实测记录见[deployment.md](deployment.md)。
 
 ---
 
