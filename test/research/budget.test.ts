@@ -72,3 +72,34 @@ void test('mixed arrivals measure formal delay and pause the research sell leg',
   assert.equal(report.productionEnablement, false);
   assert.equal((await budgetCheck(2000)).status, 'INCONCLUSIVE');
 });
+
+void test('unregistered research pacing fails and recovered monitoring requires 60 healthy seconds', async () => {
+  let now = 0;
+  const clock = {
+    now: () => now,
+    sleep: (ms: number) => {
+      now += ms;
+      return Promise.resolve();
+    },
+    random: () => 0
+  };
+  assert.throws(
+    () => new GmgnScheduler(clock, 14, 20, 6, { researchEnabled: true }),
+    /registered paced/
+  );
+  const scheduler = new GmgnScheduler(clock, 14, 20, 6, { researchEnabled: true, paced: true });
+  scheduler.setResearchMonitoringHealthy(false);
+  now = 100000;
+  scheduler.setResearchMonitoringHealthy(true);
+  assert.equal(scheduler.researchBudget.waitMs(1, now, false), 60000);
+  await assert.rejects(
+    scheduler.schedule({
+      research: true,
+      priority: 'evaluation',
+      weight: 1,
+      deadlineMs: now + 1000,
+      run: () => Promise.resolve()
+    }),
+    /deadline/
+  );
+});

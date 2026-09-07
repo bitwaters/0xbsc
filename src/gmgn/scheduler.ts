@@ -122,6 +122,11 @@ export class GmgnScheduler {
       reserveWeight >= hardPerSecond
     )
       throw new RangeError('invalid GMGN rate budget');
+    if (
+      policy.researchEnabled &&
+      (!policy.paced || softPerSecond !== 14 || hardPerSecond !== 20 || reserveWeight < 6)
+    )
+      throw new RangeError('research requires registered paced 14/20 budget with reserve 6');
     this.bucket = new WeightedTokenBucket(softPerSecond, hardPerSecond, clock.now());
     this.researchBudget = new ResearchBudget(clock.now());
     this.#blockedUntilMs = policy.initialState?.blockedUntilMs ?? 0;
@@ -149,8 +154,9 @@ export class GmgnScheduler {
     return this.#blockedUntilMs;
   }
   setResearchMonitoringHealthy(healthy: boolean): void {
+    if (!healthy || !this.#researchMonitoringHealthy)
+      this.researchBudget.unhealthy(this.clock.now());
     this.#researchMonitoringHealthy = healthy;
-    if (!healthy) this.researchBudget.unhealthy(this.clock.now());
   }
   snapshot(): Record<string, number | boolean> {
     this.prune();

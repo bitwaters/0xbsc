@@ -26,6 +26,10 @@ void test('dataset cutoff and token identity are immutable across pools and fina
       cutoffAtMs: 100,
       frozenAtMs: 86400100
     };
+    await assert.rejects(
+      freezeDataset(r, { ...plan, frozenAtMs: Date.now() + 86400000 }),
+      /WINDOW_OR_MATURITY/
+    );
     const manifest = await freezeDataset(r, plan);
     assert.deepEqual(await freezeDataset(r, plan), manifest);
     s.db

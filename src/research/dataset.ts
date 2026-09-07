@@ -19,6 +19,7 @@ export async function freezeDataset(
     !['development', 'selection', 'final'].includes(plan.use) ||
     ![plan.startAtMs, plan.cutoffAtMs, plan.frozenAtMs].every(Number.isSafeInteger) ||
     plan.startAtMs < 0 ||
+    plan.frozenAtMs > Date.now() ||
     plan.cutoffAtMs <= plan.startAtMs ||
     plan.frozenAtMs < plan.cutoffAtMs + measurementProtocol.horizonMs
   )
