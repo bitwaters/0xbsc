@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { Decimal } from 'decimal.js';
 import { canonicalJson } from '../discovery/events.js';
+import type { DiscoverySource } from '../discovery/events.js';
+import { responseRows } from '../discovery/adapters.js';
 import { apiMetricEndpoint } from '../observability/metrics.js';
 import type { RequestInput } from './client.js';
 
@@ -60,6 +62,15 @@ const wallet = {
   tags: [true]
 } as const;
 const token = {
+  base_address: true,
+  rank: true,
+  hot_interval: true,
+  id: true,
+  event_id: true,
+  signal_type: true,
+  trigger_at: true,
+  timestamp: true,
+  side: true,
   address: true,
   token_address: true,
   biggest_pool_address: true,
@@ -130,8 +141,8 @@ const shapes: Record<string, Shape> = {
   hot: { list: [token] },
   trenches: { list: [token] },
   market_signal: { list: [{ ...token, signal_type: true, timestamp: true }] },
-  smart_money: { list: [wallet] },
-  kol: { list: [wallet] }
+  smart_money: { list: [{ ...wallet, ...token }] },
+  kol: { list: [{ ...wallet, ...token }] }
 };
 export function dataRecord(value: unknown): Record<string, unknown> {
   let result = record(value);
@@ -198,7 +209,18 @@ export function createMarketFact(input: {
   purpose: RequestPurpose;
 }): MarketFact {
   const endpoint = apiMetricEndpoint(input.request.path);
-  const raw = dataRecord(input.response);
+  const source = (
+    {
+      trending: 'trending',
+      hot: 'hot',
+      trenches: 'trenches',
+      market_signal: 'signal',
+      smart_money: 'smart_money',
+      kol: 'kol'
+    } as Record<string, DiscoverySource>
+  )[endpoint];
+  // Reuse the existing source-specific array/rank/group decoder, then apply the fact allowlist.
+  const raw = source ? { list: responseRows(input.response, source) } : dataRecord(input.response);
   const qualityFlags: string[] = [];
   const payload = record(pick(raw, shapes[endpoint] ?? {}, qualityFlags));
   const request: Record<string, string | number> = {};

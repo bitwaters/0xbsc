@@ -256,7 +256,7 @@ function sanitizeValue(value: unknown): unknown {
   return sanitizePayload(value);
 }
 
-function responseRows(value: unknown, source: DiscoverySource): Record<string, unknown>[] {
+export function responseRows(value: unknown, source: DiscoverySource): Record<string, unknown>[] {
   const data = unwrapData(value);
   if (source === 'trending') {
     const rank = isRecord(data) ? [...records(data.rank), ...records(data.list)] : [];

@@ -13,6 +13,11 @@
 - [P2] socket 空闲超时不保证研究请求的总物理耗时。`src/gmgn/client.ts:192` 为新增研究请求增加 2s 总期限，Quote 不重试；正式已有超时配置不变。
 - [P2] 无界回放输出与大窗口 Decimal 展开可能耗尽内存或参数栈。`src/research/replay.ts:106` 增加报告容量失败出口；模型窗口聚合改为迭代。
 
+## SEA 核验后的追加修复
+
+- [P1] 真实发现响应使用 rank、分组 tokens 或直接数组，研究记录器仅读取 list，导致已记录物理 attempt 的 payload 为空。`src/gmgn/facts.ts` 现在复用 `src/discovery/adapters.ts:responseRows` 的现有解包逻辑，再应用允许字段清单；正式发现与筛选逻辑不变。新增四类结构的回归测试，证明字段保留和敏感字段排除。
+- Docker 构建中递归 chown 已复制的依赖造成额外文件层写入；改为先创建相同用户，再 COPY --chown，最终权限保持一致。已通过本地镜像构建与非 root 冒烟测试。
+
 ## 未完成范围与发布判断
 
 本批允许发布被动 observe 及离线工具。未发现阻止这一范围发布的未修复 P0/P1。

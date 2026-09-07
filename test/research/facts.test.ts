@@ -153,3 +153,32 @@ void test('ancillary facts inherit only the pool known at physical dispatch and 
     true
   );
 });
+
+void test('discovery facts normalize rank arrays, grouped hot tokens, signals and trenches before allowlisting', () => {
+  const row = {
+    address: '0x' + 'a'.repeat(40),
+    signal_type: 1,
+    timestamp: 1000,
+    secret: 'must-not-record'
+  };
+  const cases = [
+    { path: '/v1/market/rank', data: { rank: [row] } },
+    { path: '/v1/market/hot_searches', data: [{ interval: '1m', tokens: [row] }] },
+    { path: '/v1/market/token_signal', data: [row] },
+    { path: '/v1/trenches', data: { new: [row], complete: [] } }
+  ];
+  for (const c of cases) {
+    const f = createMarketFact({
+      request: { method: 'GET', path: c.path },
+      response: { code: 0, data: c.data },
+      purpose: 'shared_collection',
+      attemptId: c.path,
+      queuedAtMs: 1000,
+      requestedAtMs: 1000,
+      receivedAtMs: 2000
+    });
+    assert.equal((f.payload.list as unknown[]).length, 1);
+    assert.equal(f.qualityFlags.includes('UNSUPPORTED_PAYLOAD_SHAPE'), false);
+    assert.doesNotMatch(JSON.stringify(f), /must-not-record/);
+  }
+});

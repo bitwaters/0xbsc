@@ -14,7 +14,7 @@
 
 ## 验证与发布边界
 
-- Node24 `npm run ci`：309/309测试通过，类型检查、lint、编译通过。
+- Node24 `npm run ci`：310/310测试通过，类型检查、lint、编译通过。
 - OpenSpec strict validate 与 git diff --check 通过。
 - 发布文件扫描214项，没有匹配本机现有 GMGN/Telegram 凭据或私钥头；配置/数据库/artifacts/scripts仍被排除。
 - `budget-check` 为生产 scheduler 的合成争用反例：研究买腿在途时正式到达，最大新增等待2000ms；4次研究发出、4次卖腿因资源排除。证据hash `f0765a5abab1ba98a5323cf33ce9a9d26d94854fb49837b959fd596818a78bcd`。这是合成夹具证据，**不授权 execute_shadow**，不代替全链路混合负载验收。
@@ -27,6 +27,8 @@
 工程尚未完成：真实确认配对采集、完整新publisher/最终风险及报价适配、collect/execute_shadow编排、全链路负载证据、最终run登记/唯一解封/晋级凭据、切换清理。详见tasks.md未勾选项。这些不能声称仅需等待市场数据。
 
 数据契约阻塞：现有可审计Info价格无已验证来源时间，无法取得主市场基准的80%可判定覆盖证明。不能用响应时间/HTTP Date替代，更不能把卡片前涨幅计为推送后命中。解决/修订这一契约后，仍需完成有限开发和独立选择；选出唯一模型后才可启动固定30天+24h+2h最终测试。最终run尚未启动，正式新策略未激活。
+
+SEA首轮核验发现发现类响应解包不全；已返回本地修复并增加回归测试，正式发现逻辑不变。Docker权限设置改为COPY --chown，避免复制后递归改依赖文件所有权。
 
 代码审查与修复见[code-review.md](code-review.md)。部署实测记录将在deployment.md中登记。
 
