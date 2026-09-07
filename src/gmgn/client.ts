@@ -6,6 +6,12 @@ export { GmgnError } from './errors.js';
 import type { Admission, GmgnScheduler } from './scheduler.js';
 import { gmgnContext } from './context.js';
 import { apiMetricEndpoint } from '../observability/metrics.js';
+import { createMarketFact, type MarketFact, type RequestPurpose } from './facts.js';
+
+const facts = new WeakMap<object, MarketFact>();
+export function responseFact(value: unknown): MarketFact | undefined {
+  return value !== null && typeof value === 'object' ? facts.get(value) : undefined;
+}
 
 export interface HttpResponse<T> {
   status: number;
@@ -24,6 +30,7 @@ export interface RequestInput {
   query?: Record<string, string | number | undefined>;
   body?: unknown;
   timeoutMs?: number;
+  absoluteTimeoutMs?: number;
 }
 export type HttpTransport = (
   input: RequestInput,
@@ -47,6 +54,7 @@ export interface ApiObservation {
     availableWeight: number | null;
     inFlight: number | null;
     correlationId: string | null;
+    purpose?: RequestPurpose;
     rateLimit: RateLimitInfo | null;
   };
 }
@@ -63,6 +71,7 @@ export function gmgnRetryDeadline(error: unknown, nowMs: number, fallbackDelayMs
 }
 
 export class GmgnClient {
+  readonly #observedPools = new Map<string, string>();
   #cooldownUntilMs = 0;
   readonly #transport: HttpTransport;
 
@@ -77,6 +86,8 @@ export class GmgnClient {
       weights?: Record<string, number>;
       missingResetDelayMs?: number;
       onObservation?: (observation: ApiObservation) => void;
+      onFact?: (fact: MarketFact) => void;
+      onFactError?: () => void;
     }
   ) {
     if (!options.transport && !options.scheduler)
@@ -94,7 +105,14 @@ export class GmgnClient {
     try {
       return await this.attempt<T>(input, 0, true, deadlineMs);
     } catch (error) {
-      if (error instanceof GmgnError && error.kind === 'network')
+      if (
+        error instanceof GmgnError &&
+        error.kind === 'network' &&
+        !(
+          (context.research || context.purpose === 'shadow_execution') &&
+          apiMetricEndpoint(input.path) === 'quote'
+        )
+      )
         return this.attempt<T>(input, 1, false, deadlineMs);
       throw error;
     }
@@ -122,17 +140,40 @@ export class GmgnClient {
       );
     const context = gmgnContext();
     const endpoint = apiMetricEndpoint(input.path);
-    if (!this.options.scheduler) return this.perform(input, retryCount, retryEligible);
+    const research = context.research === true || context.purpose === 'shadow_execution';
+    if (research)
+      input = {
+        ...input,
+        timeoutMs: Math.min(input.timeoutMs ?? 2000, 2000),
+        absoluteTimeoutMs: 2000
+      };
+    if (!this.options.scheduler)
+      return this.perform(
+        input,
+        retryCount,
+        retryEligible,
+        undefined,
+        context.correlationId,
+        context.purpose
+      );
     const weight = this.options.weights?.[endpoint];
     if (!weight || !Number.isFinite(weight))
       return Promise.reject(new Error(`missing configured GMGN weight: ${endpoint}`));
     return this.options.scheduler.schedule({
+      research,
       weight,
       priority: context.priority ?? 'candidate',
       deadlineMs,
       ...(endpoint === 'quote' ? { channel: 'quote' } : {}),
       run: (admission) =>
-        this.perform<T>(input, retryCount, retryEligible, admission, context.correlationId)
+        this.perform<T>(
+          input,
+          retryCount,
+          retryEligible,
+          admission,
+          context.correlationId,
+          context.purpose
+        )
     });
   }
 
@@ -141,9 +182,14 @@ export class GmgnClient {
     retryCount: number,
     retryEligible: boolean,
     admission?: Admission,
-    correlationId?: string
+    correlationId?: string,
+    purpose: RequestPurpose = 'legacy_formal'
   ): Promise<T> {
     const startedAtMs = this.options.now?.() ?? Date.now();
+    const token = typeof input.query?.address === 'string' ? input.query.address.toLowerCase() : '';
+    // Bind ancillary responses to the pool known when the physical request starts.
+    // A later Info response cannot relabel an older request across a migration.
+    const poolRevision = this.#observedPools.get(token);
     const attemptId = randomUUID();
     let rateLimit: RateLimitInfo | null = null;
     const observe = (status: number | null, kind: ApiObservation['kind'], detail?: string) =>
@@ -163,6 +209,7 @@ export class GmgnClient {
           availableWeight: admission?.availableWeight ?? null,
           inFlight: admission?.inFlight ?? null,
           correlationId: correlationId ?? null,
+          purpose,
           rateLimit
         },
         ...(detail === undefined ? {} : { detail })
@@ -252,10 +299,37 @@ export class GmgnClient {
       observe(response.status, 'error', 'GMGN business code or response data invalid');
       throw new GmgnError('schema', 'GMGN business code or response data invalid', response.status);
     }
+    const completedAtMs = this.options.now?.() ?? Date.now();
     timings.set(response.body as object, {
       requestedAtMs: startedAtMs,
-      completedAtMs: this.options.now?.() ?? Date.now()
+      completedAtMs
     });
+    if (this.options.onFact) {
+      try {
+        const fact = createMarketFact({
+          ...(poolRevision ? { poolRevision } : {}),
+          request: JSON.parse(redact(JSON.stringify(input), this.options.apiKey)) as RequestInput,
+          response: JSON.parse(
+            redact(JSON.stringify(response.body), this.options.apiKey)
+          ) as unknown,
+          attemptId,
+          queuedAtMs: admission?.queuedAtMs ?? startedAtMs,
+          requestedAtMs: startedAtMs,
+          receivedAtMs: completedAtMs,
+          purpose
+        });
+        // Scrub even a credential echoed into an otherwise allowed response field.
+        facts.set(response.body as object, fact);
+        if (fact.token && fact.endpoint === 'info' && fact.poolRevision !== 'unresolved') {
+          if (this.#observedPools.size >= 20000)
+            this.#observedPools.delete(this.#observedPools.keys().next().value!);
+          this.#observedPools.set(fact.token, fact.poolRevision);
+        }
+        this.options.onFact(fact);
+      } catch {
+        this.options.onFactError?.();
+      }
+    }
     observe(response.status, 'success');
     return response.body as T;
   }
@@ -381,6 +455,13 @@ function nodeHttpsTransport(baseUrl: string): HttpTransport {
       req.setTimeout(input.timeoutMs ?? 8_000, () =>
         req.destroy(new GmgnError('timeout', 'GMGN request timed out'))
       );
+      if (input.absoluteTimeoutMs !== undefined) {
+        const timer = setTimeout(
+          () => req.destroy(new GmgnError('timeout', 'GMGN physical deadline exceeded')),
+          input.absoluteTimeoutMs
+        );
+        req.once('close', () => clearTimeout(timer));
+      }
       req.on('error', (error) => reject(error));
       if (payload) req.write(payload);
       req.end();

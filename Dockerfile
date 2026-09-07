@@ -13,6 +13,8 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 FROM node:24-bookworm-slim AS runtime
+LABEL org.0xbsc.publication-compatibility="global-token-lock-v1" \
+      org.0xbsc.publication-format="legacy-v1"
 WORKDIR /app
 ENV NODE_ENV=production \
     HOME=/home/signalbot

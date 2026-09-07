@@ -6,6 +6,7 @@ import test from 'node:test';
 import { OutboxDeliveryService } from '../../src/delivery/outbox.js';
 import { TelegramClient, TelegramError } from '../../src/delivery/telegram.js';
 import { Storage } from '../../src/storage/database.js';
+import { PublicationGuard } from '../../src/delivery/publication-guard.js';
 
 async function withOutbox(
   responder: (attempt: number) => Promise<unknown>,
@@ -16,7 +17,8 @@ async function withOutbox(
   }) => Promise<void>,
   prepareBeforeDelivery?: ConstructorParameters<
     typeof OutboxDeliveryService
-  >[0]['prepareBeforeDelivery']
+  >[0]['prepareBeforeDelivery'],
+  protectedPublication = false
 ): Promise<void> {
   const directory = await mkdtemp(join(tmpdir(), 'gmgn-outbox-'));
   const storage = await Storage.open(join(directory, 'signal.db'));
@@ -61,6 +63,9 @@ async function withOutbox(
       }
     });
     const service = new OutboxDeliveryService({
+      ...(protectedPublication
+        ? { publicationGuard: new PublicationGuard(storage, () => now + attempt) }
+        : {}),
       storage,
       telegram,
       chatId: '-100',
@@ -602,5 +607,58 @@ void test('unknown delivery retry preserves both attempts and links only the con
         2
       );
     }
+  );
+});
+
+void test('compatibility publisher preserves UNKNOWN without automatic retry', async () => {
+  await withOutbox(
+    () => Promise.reject(new TelegramError('timeout', 'uncertain')),
+    async ({ storage, service, sent }) => {
+      await service.recoverAndDeliver();
+      assert.equal(sent(), 1);
+      await service.recoverAndDeliver();
+      assert.equal(sent(), 1);
+      assert.deepEqual(storage.db.prepare('SELECT state FROM publication_token_locks').get(), {
+        state: 'UNKNOWN'
+      });
+    },
+    undefined,
+    true
+  );
+});
+void test('compatibility publisher sends once and freezes the confirmed token lock', async () => {
+  await withOutbox(
+    () => Promise.resolve({ ok: true, result: { message_id: 99, chat: { id: '-100' } } }),
+    async ({ storage, service, sent }) => {
+      await service.recoverAndDeliver();
+      await service.recoverAndDeliver();
+      assert.equal(sent(), 1);
+      assert.deepEqual(storage.db.prepare('SELECT state FROM publication_token_locks').get(), {
+        state: 'SENT'
+      });
+      assert.deepEqual(storage.db.prepare('SELECT COUNT(*) n FROM publisher_leases').get(), {
+        n: 0
+      });
+    },
+    undefined,
+    true
+  );
+});
+
+void test('successful Telegram response followed by database failure preserves UNKNOWN lock', async () => {
+  await withOutbox(
+    () => Promise.resolve({ ok: true, result: { message_id: 99, chat: { id: '-100' } } }),
+    async ({ storage, service, sent }) => {
+      storage.confirmTelegramDelivery = () => Promise.reject(new Error('sqlite temporary failure'));
+      await service.recoverAndDeliver();
+      assert.equal(sent(), 1);
+      assert.deepEqual(storage.db.prepare('SELECT state FROM publication_token_locks').get(), {
+        state: 'UNKNOWN'
+      });
+      await service.recoverAndDeliver();
+      assert.equal(sent(), 1);
+    },
+    undefined,
+    true
   );
 });

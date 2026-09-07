@@ -5,6 +5,10 @@ services:
     image: bsc-meme-signal-bot:local
     restart: unless-stopped
     read_only: true
+    environment:
+      # Passive recording reuses existing responses. It creates no additional API calls.
+      RESEARCH_MODE: ${RESEARCH_MODE:-observe}
+      RESEARCH_RUN_ID: ${RESEARCH_RUN_ID:-research-observe-v1}
     volumes:
       - type: bind
         source: ./config.yaml

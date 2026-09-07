@@ -22,6 +22,9 @@ import { finalFreshnessDecision, quoteAllowsDelivery } from './quote/gate.js';
 import { SafetyRuntime } from './safety/runtime.js';
 import { LazySafetyRuntime } from './safety/lazy-runtime.js';
 import { Storage } from './storage/database.js';
+import { ResearchRecorder } from './research/recorder.js';
+import type { MarketFact } from './gmgn/facts.js';
+import { PublicationGuard } from './delivery/publication-guard.js';
 import { TelegramClient } from './delivery/telegram.js';
 import { TelegramCallbackHandler, TelegramLongPoller } from './delivery/callbacks.js';
 import { OutboxDeliveryService } from './delivery/outbox.js';
@@ -47,6 +50,13 @@ const clock: Clock = {
   random: Math.random
 };
 const storage = await Storage.open(loaded.config.storage.sqlite_path);
+const researchRecorder =
+  loaded.config.research?.mode === 'observe'
+    ? new ResearchRecorder(storage, loaded.config.research, (reason) =>
+        console.error(JSON.stringify({ event: 'research_recording_stopped', reason }))
+      )
+    : null;
+await researchRecorder?.start(clock.now());
 const repairTasks = await storage.requeueIncompletePaths(Date.now());
 if (repairTasks)
   console.log(JSON.stringify({ event: 'historical_path_repairs_queued', count: repairTasks }));
@@ -87,6 +97,12 @@ const api = new GmgnApi(
     scheduler,
     weights: loaded.config.gmgn.endpoint_weights,
     missingResetDelayMs: (loaded.config.gmgn.rate_limit.missing_reset_delay_seconds ?? 30) * 1000,
+    ...(researchRecorder
+      ? {
+          onFact: (fact: MarketFact) => researchRecorder.fact(fact),
+          onFactError: () => researchRecorder.stop('FACT_CONTRACT_FAILED')
+        }
+      : {}),
     onObservation: (observation) => {
       const endpoint = apiMetricEndpoint(observation.input.path);
       void storage
@@ -775,6 +791,7 @@ const processCandidate = (
 };
 const telegram = new TelegramClient({ botToken: loaded.config.telegram.bot_token });
 const outboxDelivery = new OutboxDeliveryService({
+  publicationGuard: new PublicationGuard(storage),
   storage,
   telegram,
   chatId: loaded.config.telegram.chat_ids[0]!,
@@ -790,22 +807,23 @@ const outboxDelivery = new OutboxDeliveryService({
     if (typeof correlationId === 'string')
       await storage.recordOperationTrace({ correlationId, stage, occurredAtMs });
   },
-  onConfirmed: async (signal, confirmedAtMs) => {
-    const decision = asRecord(signal.decision);
-    const tokenAddress = requiredString(decision.tokenAddress, 'tokenAddress');
-    const provider = await GmgnQuoteProvider.create({
-      api: candidateApi,
-      config: loaded.config,
-      tokenAddress
-    });
-    await capturePostConfirmationEntryQuotes(storage, provider, {
-      episodeId: signal.episodeId,
-      signalId: signal.id,
-      confirmedAtMs,
-      sizesUsd: loaded.config.quote.position_usd,
-      now: () => clock.now()
-    });
-  },
+  onConfirmed: (signal, confirmedAtMs) =>
+    withGmgnContext({ purpose: 'baseline' }, async () => {
+      const decision = asRecord(signal.decision);
+      const tokenAddress = requiredString(decision.tokenAddress, 'tokenAddress');
+      const provider = await GmgnQuoteProvider.create({
+        api: candidateApi,
+        config: loaded.config,
+        tokenAddress
+      });
+      await capturePostConfirmationEntryQuotes(storage, provider, {
+        episodeId: signal.episodeId,
+        signalId: signal.id,
+        confirmedAtMs,
+        sizesUsd: loaded.config.quote.position_usd,
+        now: () => clock.now()
+      });
+    }),
   onConfirmedError: (signal, error) =>
     console.error(
       JSON.stringify({
@@ -832,6 +850,9 @@ const discovery = new DiscoveryRuntime({
   scheduler,
   clock,
   onEvent: processCandidate,
+  ...(researchRecorder
+    ? { onUniverseObserved: (event: NormalizedEvent) => researchRecorder.event(event) }
+    : {}),
   onEventObserved: (_event, persisted) => {
     if (persisted && safety.precheck(_event).allowed) routes.observe(_event);
     metrics.increment('discovered');
@@ -989,7 +1010,7 @@ let outcomeLoopRunning = false;
 const outcomeTimer = setInterval(() => {
   if (outcomeLoopRunning) return;
   outcomeLoopRunning = true;
-  void withGmgnContext({ priority: 'evaluation' }, () => runDueOutcomeTasks())
+  void withGmgnContext({ priority: 'evaluation', purpose: 'outcome' }, () => runDueOutcomeTasks())
     .catch((error: unknown) =>
       console.error(
         JSON.stringify({
@@ -1029,13 +1050,26 @@ const metricTimer = setInterval(() => {
 const writeHealth = () =>
   writeFileSync(
     '/tmp/gmgn-runtime-health.json',
-    JSON.stringify({ atMs: clock.now(), revision: loaded.revisionId, gmgn: scheduler.snapshot() })
+    JSON.stringify({
+      atMs: clock.now(),
+      revision: loaded.revisionId,
+      gmgn: scheduler.snapshot(),
+      research: {
+        mode: loaded.config.research?.mode ?? 'off',
+        runId: loaded.config.research?.run_id ?? null,
+        pendingWrites: researchRecorder?.pending ?? 0,
+        stoppedReason: researchRecorder?.stoppedReason ?? null,
+        newPublisherEnabled: false,
+        marketBaseline: 'UNAVAILABLE'
+      }
+    })
   );
 writeHealth();
 const healthTimer = setInterval(writeHealth, 5000);
 console.log(JSON.stringify({ event: 'discovery_started', revision_id: loaded.revisionId }));
 for (const signal of ['SIGINT', 'SIGTERM'] as const)
   process.once(signal, () => {
+    researchRecorder?.close();
     clearInterval(dueTimer);
     clearInterval(telegramPollTimer);
     clearInterval(outboxDeliveryTimer);

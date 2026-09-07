@@ -80,9 +80,22 @@ const lazyDeepSafety = z
   })
   .strict();
 
-const runtimeConfigSchema = z
+export const runtimeConfigSchema = z
   .object({
     runtime: z.object({ chain: z.literal('bsc'), mode: z.enum(['dry_run', 'live']) }).strict(),
+    research: z
+      .object({
+        mode: z.enum(['off', 'observe']),
+        run_id: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/),
+        max_storage_bytes: z
+          .number()
+          .int()
+          .min(65536)
+          .max(2 * 1024 ** 3)
+          .default(2 * 1024 ** 3)
+      })
+      .strict()
+      .optional(),
     gmgn: z
       .object({
         base_url: z.string().url(),
@@ -284,9 +297,27 @@ export async function loadRuntimeConfig(path: string): Promise<LoadedConfig> {
   }
   if ([parsed.data.gmgn.api_key, parsed.data.telegram.bot_token].includes('REPLACE_ME'))
     throw new ConfigError('GMGN and Telegram credentials must be configured before startup');
+  const researchMode = process.env.RESEARCH_MODE ?? env?.RESEARCH_MODE;
+  if (researchMode !== undefined) {
+    const mode = z.enum(['off', 'observe']).safeParse(researchMode);
+    const runId = z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]{1,80}$/)
+      .safeParse(process.env.RESEARCH_RUN_ID ?? env?.RESEARCH_RUN_ID ?? 'research-observe-v1');
+    if (!mode.success || !runId.success)
+      throw new ConfigError('invalid research environment override');
+    parsed.data.research = {
+      mode: mode.data,
+      run_id: runId.data,
+      max_storage_bytes: parsed.data.research?.max_storage_bytes ?? 2147483648
+    };
+  }
   assertCrossFieldRules(parsed.data);
   const sanitizedSnapshot = redactSecrets(parsed.data) as Record<string, unknown>;
-  const revisionId = createHash('sha256').update(JSON.stringify(sanitizedSnapshot)).digest('hex');
+  // Passive research settings must not expire legacy candidates or pending deliveries.
+  const formalSnapshot = { ...sanitizedSnapshot };
+  delete formalSnapshot.research;
+  const revisionId = createHash('sha256').update(JSON.stringify(formalSnapshot)).digest('hex');
   return { config: parsed.data, revisionId, sanitizedSnapshot };
 }
 
@@ -306,6 +337,11 @@ const userIds = z
   .pipe(z.array(z.string().regex(/^[1-9]\d*$/)));
 const credentialFileSchema = z
   .object({
+    RESEARCH_MODE: z.enum(['off', 'observe']).optional(),
+    RESEARCH_RUN_ID: z
+      .string()
+      .regex(/^[a-zA-Z0-9_-]{1,80}$/)
+      .optional(),
     RUNTIME_MODE: z.enum(['dry_run', 'live']),
     GMGN_API_KEY: credentialValue,
     GMGN_QUOTE_WALLET: z.string().regex(/^0x[a-fA-F0-9]{40}$/),

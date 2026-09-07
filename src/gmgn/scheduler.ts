@@ -1,6 +1,7 @@
 import { GmgnError } from './errors.js';
 import { gmgnContext, withGmgnContext } from './context.js';
 import type { LimiterState } from './limiter-state.js';
+import { ResearchBudget } from '../research/budget.js';
 export type Priority = 'formal' | 'discovery' | 'candidate' | 'observation' | 'evaluation';
 const priorityRank: Record<Priority, number> = {
   formal: 0,
@@ -16,6 +17,7 @@ export interface Clock {
   random(): number;
 }
 export interface ScheduledTask<T> {
+  research?: boolean;
   key?: string;
   weight: number;
   priority: Priority;
@@ -76,6 +78,7 @@ interface QueueItem {
   jitterApplied: boolean;
 }
 export interface SchedulerPolicy {
+  researchEnabled?: boolean;
   paced?: boolean;
   maxConcurrent?: number;
   channelIntervalsMs?: Record<string, number>;
@@ -85,6 +88,10 @@ export interface SchedulerPolicy {
 }
 
 export class GmgnScheduler {
+  readonly researchBudget: ResearchBudget;
+  #researchInFlight = 0;
+  #formalInFlight = 0;
+  #researchMonitoringHealthy = true;
   readonly bucket: WeightedTokenBucket;
   #queue: QueueItem[] = [];
   #scheduledKeys = new Set<string>();
@@ -116,6 +123,7 @@ export class GmgnScheduler {
     )
       throw new RangeError('invalid GMGN rate budget');
     this.bucket = new WeightedTokenBucket(softPerSecond, hardPerSecond, clock.now());
+    this.researchBudget = new ResearchBudget(clock.now());
     this.#blockedUntilMs = policy.initialState?.blockedUntilMs ?? 0;
     this.#nextDispatchAtMs = policy.initialState?.nextDispatchAtMs ?? 0;
     this.#probeRequired = Boolean(policy.paced);
@@ -123,6 +131,7 @@ export class GmgnScheduler {
     this.#channelBackoffMs = { ...policy.initialState?.channelBackoffMs };
   }
   noteRateLimit(channel: string): void {
+    this.researchBudget.unhealthy(this.clock.now());
     const base = this.policy.channelCompletionIntervalsMs?.[channel];
     if (base === undefined) return;
     this.#channelBackoffMs[channel] = Math.min(
@@ -139,12 +148,18 @@ export class GmgnScheduler {
   get cooldownUntilMs(): number {
     return this.#blockedUntilMs;
   }
+  setResearchMonitoringHealthy(healthy: boolean): void {
+    this.#researchMonitoringHealthy = healthy;
+    if (!healthy) this.researchBudget.unhealthy(this.clock.now());
+  }
   snapshot(): Record<string, number | boolean> {
     this.prune();
     return {
       queued: this.#queue.length,
       ...(this.#persistenceError ? { persistenceFailed: true } : {}),
       inFlight: this.#inFlight,
+      researchInFlight: this.#researchInFlight,
+      formalInFlight: this.#formalInFlight,
       cooldownUntilMs: this.#blockedUntilMs,
       probeRequired: this.#probeRequired,
       lastSecondWeight: this.#recent.reduce((sum, x) => sum + x.weight, 0),
@@ -154,6 +169,7 @@ export class GmgnScheduler {
     };
   }
   pause(untilMs: number): void {
+    this.researchBudget.unhealthy(Math.max(untilMs, this.clock.now()));
     this.#blockedUntilMs = Math.max(this.#blockedUntilMs, untilMs);
     this.#probeRequired = true;
     this.#generation++;
@@ -193,6 +209,15 @@ export class GmgnScheduler {
     }
   }
   schedule<T>(task: ScheduledTask<T>): Promise<T> {
+    if (
+      task.research &&
+      (!this.policy.researchEnabled ||
+        task.priority === 'formal' ||
+        task.weight > 5 ||
+        this.reserveWeight < 6)
+    )
+      return Promise.reject(new Error('RESEARCH_ADMISSION_DISABLED'));
+    if (task.priority === 'formal') this.researchBudget.unhealthy(this.clock.now());
     if (this.#persistenceError) return Promise.reject(this.#persistenceError);
     if (
       !Number.isFinite(task.weight) ||
@@ -261,11 +286,28 @@ export class GmgnScheduler {
         }
         const limit = this.#probeRequired ? 1 : (this.policy.maxConcurrent ?? Infinity);
         if (this.#inFlight >= limit) break;
+        const formalBusy =
+          this.#formalInFlight > 0 || this.#queue.some((x) => x.task.priority === 'formal');
+        if (formalBusy || !this.#researchMonitoringHealthy) this.researchBudget.unhealthy(now);
+        // Research is droppable at original coordinates. Never hold a stale leg behind formal work.
+        for (const queued of [...this.#queue]) {
+          if (
+            queued.task.research &&
+            (formalBusy ||
+              !this.#researchMonitoringHealthy ||
+              (queued.task.channel === 'quote' && 2000 + this.completionGap('quote') > 3000))
+          ) {
+            this.#queue.splice(this.#queue.indexOf(queued), 1);
+            if (queued.task.key) this.#scheduledKeys.delete(queued.task.key);
+            queued.reject(new Error('EXECUTION_NOT_EVALUATED_RESOURCE'));
+          }
+        }
         const index = this.#queue.findIndex(
           (x) =>
-            !x.task.channel ||
-            (!this.#channels.has(x.task.channel) &&
-              (this.#channelNextAtMs[x.task.channel] ?? 0) <= now)
+            (!x.task.research || this.#researchInFlight === 0) &&
+            (!x.task.channel ||
+              (!this.#channels.has(x.task.channel) &&
+                (this.#channelNextAtMs[x.task.channel] ?? 0) <= now))
         );
         if (index < 0) {
           const wake = Math.min(
@@ -294,6 +336,11 @@ export class GmgnScheduler {
         const admittedWeight =
           task.priority === 'formal' ? task.weight : task.weight + this.reserveWeight;
         let wait = this.bucket.waitMs(admittedWeight, now);
+        if (task.research)
+          wait = Math.max(
+            wait,
+            this.researchBudget.waitMs(task.weight, now, task.channel === 'quote')
+          );
         if (this.policy.paced) {
           this.prune();
           wait = Math.max(wait, this.#nextDispatchAtMs - now);
@@ -328,6 +375,11 @@ export class GmgnScheduler {
         }
         if (!this.bucket.consume(task.weight, now))
           throw new Error('GMGN budget admission invariant');
+        if (task.research) {
+          this.researchBudget.consume(task.weight, now, task.channel === 'quote');
+          this.#researchInFlight++;
+        }
+        if (task.priority === 'formal') this.#formalInFlight++;
         this.#recent.push({ atMs: now, weight: task.weight });
         this.#inFlight++;
         if (task.channel) this.#channels.add(task.channel);
@@ -355,6 +407,11 @@ export class GmgnScheduler {
           )
           .finally(() => {
             this.#inFlight--;
+            if (task.research) this.#researchInFlight--;
+            if (task.priority === 'formal') {
+              this.#formalInFlight--;
+              this.researchBudget.unhealthy(this.clock.now());
+            }
             if (task.channel) {
               const gap = this.completionGap(task.channel);
               if (gap > 0) {

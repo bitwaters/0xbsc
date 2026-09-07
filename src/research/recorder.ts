@@ -1,0 +1,129 @@
+import type { RuntimeConfig } from '../config/types.js';
+import type { NormalizedEvent } from '../discovery/events.js';
+import type { MarketFact } from '../gmgn/facts.js';
+import { ResearchStorage } from './storage.js';
+import type { Storage } from '../storage/database.js';
+import { dirname, join } from 'node:path';
+import { ResearchArchive } from './archive.js';
+
+/** Passive, bounded observer. It cannot call an API or feed the formal candidate queue. */
+export class ResearchRecorder {
+  readonly research: ResearchStorage;
+  pending = 0;
+  stoppedReason: string | null = null;
+  private readonly events = new Map<string, NormalizedEvent>();
+  private eventDrain = false;
+  readonly archive: ResearchArchive;
+  private maintenance: ReturnType<typeof setInterval> | null = null;
+  constructor(
+    storage: Storage,
+    readonly config: NonNullable<RuntimeConfig['research']>,
+    private readonly onError: (reason: string) => void
+  ) {
+    this.research = new ResearchStorage(storage);
+    this.archive = new ResearchArchive(
+      this.research,
+      join(dirname(storage.db.name), 'research-archives')
+    );
+  }
+  async start(nowMs: number): Promise<void> {
+    if (this.config.mode === 'observe') {
+      await this.research.startRun(this.config.run_id, this.config, nowMs);
+      const active = await this.research.storage.write(() =>
+        this.research.storage.db
+          .prepare("SELECT 1 FROM research_runs WHERE run_id=? AND status='ACTIVE'")
+          .get(this.config.run_id)
+      );
+      if (!active) {
+        this.stop('RESEARCH_RUN_NOT_ACTIVE');
+        return;
+      }
+      this.maintenance = setInterval(
+        () =>
+          this.enqueue(async () => {
+            await this.archive.maintain(Date.now(), this.config.max_storage_bytes);
+          }),
+        60000
+      );
+      this.maintenance.unref();
+    }
+  }
+  fact(fact: MarketFact): void {
+    this.enqueue(async () => {
+      const inserted = await this.research.recordFact(
+        fact,
+        this.config.run_id,
+        this.config.max_storage_bytes
+      );
+      if (!inserted) {
+        const active = await this.research.storage.write(() =>
+          this.research.storage.db
+            .prepare("SELECT 1 FROM research_runs WHERE run_id=? AND status='ACTIVE'")
+            .get(this.config.run_id)
+        );
+        if (!active) this.stop('RESEARCH_RUN_NOT_ACTIVE');
+      }
+    });
+  }
+  event(event: NormalizedEvent): void {
+    if (this.config.mode !== 'observe' || this.stoppedReason) return;
+    if (this.events.size >= 2000) {
+      this.stop('RESEARCH_UNIVERSE_BACKLOG');
+      return;
+    }
+    this.events.set(event.key, event);
+    if (this.eventDrain) return;
+    this.eventDrain = true;
+    this.enqueue(async () => {
+      try {
+        while (this.events.size && !this.stoppedReason) {
+          const next = this.events.values().next().value!;
+          this.events.delete(next.key);
+          // One queued writer at a time lets formal work interleave with a large discovery batch.
+          await this.research.recordUniverse(
+            next,
+            this.config.run_id,
+            this.config.run_id,
+            20,
+            this.config.max_storage_bytes
+          );
+        }
+      } finally {
+        this.eventDrain = false;
+      }
+    });
+  }
+  private enqueue(operation: () => Promise<void>): void {
+    if (this.config.mode !== 'observe' || this.stoppedReason) return;
+    if (this.pending >= 200) {
+      this.stop('RESEARCH_WRITE_BACKLOG');
+      return;
+    }
+    this.pending++;
+    void operation()
+      .catch(() => this.stop('RESEARCH_WRITE_FAILED'))
+      .finally(() => {
+        this.pending--;
+      });
+  }
+  stop(reason: string): void {
+    if (this.stoppedReason) return;
+    this.stoppedReason = reason;
+    this.events.clear();
+    this.close();
+    this.onError(reason);
+    void this.research.storage
+      .write(() => {
+        this.research.storage.db
+          .prepare(
+            "UPDATE research_runs SET status='INCONCLUSIVE' WHERE run_id=? AND status='ACTIVE'"
+          )
+          .run(this.config.run_id);
+      })
+      .catch(() => undefined);
+  }
+  close(): void {
+    if (this.maintenance) clearInterval(this.maintenance);
+    this.maintenance = null;
+  }
+}

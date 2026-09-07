@@ -1,6 +1,7 @@
 import type { PendingOutboxSignal, Storage } from '../storage/database.js';
 import type { InlineKeyboardMarkup, InputRichMessage, TelegramClient } from './telegram.js';
 import { TelegramError } from './telegram.js';
+import type { PublicationGuard } from './publication-guard.js';
 
 export interface DeliveryPayload {
   text?: string;
@@ -12,6 +13,7 @@ export class OutboxDeliveryService {
   constructor(
     private readonly options: {
       storage: Storage;
+      publicationGuard?: PublicationGuard;
       telegram: TelegramClient;
       chatId: string | number;
       render: (signal: PendingOutboxSignal) => DeliveryPayload;
@@ -33,12 +35,36 @@ export class OutboxDeliveryService {
 
   async recoverAndDeliver(): Promise<void> {
     const now = this.options.now?.() ?? Date.now();
-    for (const signal of await this.options.storage.pendingOutboxSignals(now))
+    for (const signal of await this.options.storage.pendingOutboxSignals(
+      now,
+      Boolean(this.options.publicationGuard)
+    ))
       await this.deliver(signal);
   }
 
   async deliver(
     signal: PendingOutboxSignal
+  ): Promise<'sent' | 'unknown' | 'failed' | 'skipped' | 'deferred'> {
+    const guard = this.options.publicationGuard;
+    if (!guard) return this.deliverWithLease(signal);
+    // An uncertain send is never automatically retried by the compatibility publisher.
+    if (signal.deliveryState === 'DELIVERY_UNKNOWN') return 'skipped';
+    const owner = await guard.acquire();
+    if (!owner) return 'deferred';
+    const heartbeat = setInterval(() => {
+      void guard.renew(owner).catch(() => undefined);
+    }, 10000);
+    try {
+      return await this.deliverWithLease(signal, owner);
+    } finally {
+      clearInterval(heartbeat);
+      await guard.release(owner);
+    }
+  }
+
+  private async deliverWithLease(
+    signal: PendingOutboxSignal,
+    owner?: string
   ): Promise<'sent' | 'unknown' | 'failed' | 'skipped' | 'deferred'> {
     const now = this.options.now?.() ?? Date.now();
     if (signal.deliveryState === 'DELIVERY_UNKNOWN') {
@@ -80,6 +106,8 @@ export class OutboxDeliveryService {
       return 'failed';
     }
     const payload = this.options.render(preparedSignal);
+    let transportStarted = false;
+    let transportSucceeded = false;
     try {
       const requestAtMs = this.options.now?.() ?? Date.now();
       if ((payload.text === undefined) === (payload.richMessage === undefined))
@@ -94,6 +122,9 @@ export class OutboxDeliveryService {
         requestAtMs
       );
       await this.options.onTrace?.(preparedSignal, 'telegram_request', requestAtMs);
+      if (owner && !(await this.options.publicationGuard!.reserve(owner, signal.id)))
+        return 'skipped';
+      transportStarted = true;
       const message =
         payload.richMessage === undefined
           ? await this.options.telegram.sendMessage({
@@ -106,6 +137,7 @@ export class OutboxDeliveryService {
               richMessage: payload.richMessage,
               ...(payload.replyMarkup === undefined ? {} : { replyMarkup: payload.replyMarkup })
             });
+      transportSucceeded = true;
       const confirmedAtMs = this.options.now?.() ?? Date.now();
       const confirmed = await this.options.storage.confirmTelegramDelivery({
         signalId: signal.id,
@@ -135,8 +167,12 @@ export class OutboxDeliveryService {
       return 'skipped';
     } catch (error) {
       const failedAtMs = this.options.now?.() ?? Date.now();
-      const classified = classifyDeliveryError(error);
+      const classified =
+        transportSucceeded || (transportStarted && !(error instanceof TelegramError))
+          ? 'unknown'
+          : classifyDeliveryError(error);
       if (classified === 'rate_limit') {
+        if (owner) await this.options.publicationGuard!.knownUnsent(signal.id);
         const retryAfterMs =
           error instanceof TelegramError && error.retryAfterMs !== undefined
             ? error.retryAfterMs
@@ -162,6 +198,7 @@ export class OutboxDeliveryService {
         deliveryErrorText(error),
         failedAtMs
       );
+      if (owner) await this.options.publicationGuard!.knownUnsent(signal.id);
       return 'failed';
     }
   }

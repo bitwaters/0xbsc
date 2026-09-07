@@ -256,6 +256,13 @@ export class Storage {
           .get(input.tokenAddress.toLowerCase());
         if (sent) return 'new_launch_already_sent';
       }
+      if (
+        this.db.prepare("SELECT 1 FROM sqlite_schema WHERE name='publication_token_locks'").get() &&
+        this.db
+          .prepare("SELECT 1 FROM publication_token_locks WHERE chain='bsc' AND token=?")
+          .get(input.tokenAddress.toLowerCase())
+      )
+        return 'reentry_not_allowed';
       const previous = this.db
         .prepare(
           `SELECT id, state, ended_at_ms AS endedAtMs, rejection_reason AS rejectionReason FROM episodes
@@ -913,7 +920,10 @@ export class Storage {
     });
   }
 
-  pendingOutboxSignals(nowMs = Date.now()): Promise<PendingOutboxSignal[]> {
+  pendingOutboxSignals(
+    nowMs = Date.now(),
+    protectedPublication = false
+  ): Promise<PendingOutboxSignal[]> {
     return this.write(
       () =>
         this.db
@@ -922,10 +932,12 @@ export class Storage {
                   quote_snapshot_json AS quoteSnapshot, decision_json AS decision
            FROM signals
            WHERE delivery_state IN ('PENDING', 'DELIVERY_UNKNOWN')
+             AND decision_format='legacy-v1'
+             AND (?=0 OR NOT EXISTS(SELECT 1 FROM publication_token_locks l JOIN episodes e ON e.chain=l.chain AND e.token_address=l.token WHERE e.id=signals.episode_id))
              AND (next_delivery_attempt_at_ms IS NULL OR next_delivery_attempt_at_ms <= ?)
            ORDER BY created_at_ms, id`
           )
-          .all(nowMs)
+          .all(protectedPublication ? 1 : 0, nowMs)
           .map((row) => {
             const candidate = row as Omit<PendingOutboxSignal, 'quoteSnapshot' | 'decision'> & {
               quoteSnapshot: string;

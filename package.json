@@ -13,6 +13,7 @@
     "ci": "npm run check && npm run build",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
+    "research": "node dist/research/cli.js",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",

@@ -2,6 +2,7 @@ import type { RuntimeConfig } from '../config/types.js';
 import type { GmgnApi } from '../gmgn/api.js';
 import type { Clock, GmgnScheduler } from '../gmgn/scheduler.js';
 import type { Storage } from '../storage/database.js';
+import { withGmgnContext } from '../gmgn/context.js';
 import { BoundedWorkQueue } from './work-queue.js';
 import { adaptGmgnResponse } from './adapters.js';
 import { SnapshotDeduplicator, type DiscoverySource, type NormalizedEvent } from './events.js';
@@ -33,6 +34,7 @@ export class DiscoveryRuntime {
       clock: Clock;
       onEvent?: (event: NormalizedEvent) => Promise<void>;
       onEventObserved?: (event: NormalizedEvent, persisted: boolean) => void;
+      onUniverseObserved?: (event: NormalizedEvent) => void;
       onEventError?: (event: NormalizedEvent, error: Error) => void;
     }
   ) {
@@ -67,9 +69,22 @@ export class DiscoveryRuntime {
   }
 
   private async runTick(name: string): Promise<number> {
-    const outcome = await this.polling.tick(name);
+    const outcome = await withGmgnContext({ purpose: 'shared_collection' }, () =>
+      this.polling.tick(name)
+    );
     const source = sourceForPoll(name);
     if (outcome.status !== 'success' || source === null || outcome.value === undefined) return 0;
+    if (this.input.onUniverseObserved) {
+      for (const event of adaptGmgnResponse({
+        source,
+        pollKey: name,
+        response: outcome.value,
+        observedAtMs: this.input.clock.now(),
+        ttlMs: evidenceTtlMs(source, this.input.config)
+      })) {
+        this.input.onUniverseObserved(event);
+      }
+    }
     const events = adaptGmgnResponse({
       source,
       pollKey: name,

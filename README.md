@@ -93,3 +93,26 @@ Migration 014 cancels only pending Telegram edits, including edits from previous
 It preserves completed edit history and all outcome tasks. Previously edited cards have
 no trustworthy original full payload, so their snapshot link remains empty; the stored
 frozen entry price is preserved and no historical card is reconstructed or resent.
+
+### 研究底座（尚未切换正式筛选）
+
+Compose 显式启用 `RESEARCH_MODE=observe`，复用现有 GMGN 响应记录事实、物理请求时间及公共候选母集，不增加 API 请求。应用直接启动且未配置研究节点时默认 off。正式 publisher 仍使用 legacy 规则，发送后的卡片保持冻结；成功和未知发送的 token 锁跨进程、池版本保留，UNKNOWN 不自动重发。
+
+`.env` 可配置 `RESEARCH_MODE=off|observe` 和 `RESEARCH_RUN_ID`。新 run 必须使用新的 ID；不能通过重启覆盖已终止的研究记录。详细进度及限制见 [实施记录](openspec/changes/redesign-signal-funnel/implementation.md)。
+
+构建后可使用以下离线命令；audit / replay / precheck 不调用 GMGN 或 Telegram，也不读取运行凭据：
+
+```sh
+npm run research -- audit --db /path/to/existing.sqlite --format markdown
+npm run research -- manifest validate --file model.json
+npm run research -- replay --file replay-input.json
+npm run research -- budget-check
+npm run research -- readiness
+npm run research -- deployment-precheck --db /path/to/existing.sqlite
+```
+
+`replay-input.json` 明确提供 models、facts、frames、events 和脱敏 legacyConfig。用 `--db` 时以 factIds 从只读数据库及同目录 research-archives 读取校验后的事实。所有决定只使用当时已返回的数据；离线输出标记安全/执行未评估。
+
+`dataset freeze --db DB --file PLAN` 会写入本机数据用途台账并固定 token 分组/截止/事实引用；不能在开发集、选择集和最终集间重用同一 token 的新池。`select --file CANDIDATES` 与 `evaluate-paired --file INPUT` 提供有限模型选择及成对统计。统计 PASS 不是晋级凭据；当前构建未开放 collect、execute_shadow 或 validated publisher。
+
+当前 Info 缺少已验证的价格来源时间，市场主基准报告 UNAVAILABLE。该版本提供测量与诊断工具，不能据此声称新规则已提高命中率。最终前向验证与正式切换仍须完成提案剩余任务。部署和回滚均保留服务器原数据库；开始新格式正式发布后，只能回到带 `org.0xbsc.publication-compatibility=global-token-lock-v1` 的已登记镜像。

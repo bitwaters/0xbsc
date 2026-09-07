@@ -1,0 +1,458 @@
+{
+  "provenance": "gmgn-openapi-audit-2026-09-03T16-23-34-346Z.json",
+  "source_sha256": "4f0b0f862c95e326139dc2fd2c66182e74ca20d5491ed8c944c21c92d3abb369",
+  "kind": "recorded_shapes_not_raw_payloads",
+  "responses": [
+    {
+      "path": "/v1/token/info",
+      "shape": {
+        "address": "string",
+        "symbol": "string",
+        "name": "string",
+        "decimals": "number",
+        "logo": "string",
+        "banner": "string",
+        "biggest_pool_address": "string",
+        "open_timestamp": "number",
+        "migrated_timestamp": "number",
+        "holder_count": "number",
+        "circulating_supply": "string",
+        "total_supply": "string",
+        "max_supply": "string",
+        "liquidity": "string",
+        "creation_timestamp": "number",
+        "standard": "string",
+        "trade_fee": "string",
+        "total_fee": "string",
+        "og": "boolean",
+        "image_dup_count": "number",
+        "visiting_count": "number",
+        "launchpad": "string",
+        "launchpad_status": "number",
+        "launchpad_progress": "number",
+        "launchpad_platform": "string",
+        "migrated_pool": "string",
+        "migration_market_cap": "number",
+        "migration_market_cap_quote": "string",
+        "ath_price": "number",
+        "locked_ratio": "number",
+        "price": {
+          "address": "string",
+          "price": "string",
+          "price_1m": "string",
+          "price_5m": "string",
+          "price_1h": "string",
+          "price_6h": "string",
+          "price_24h": "string",
+          "buys_1m": "number",
+          "buys_5m": "number",
+          "buys_1h": "number",
+          "buys_6h": "number",
+          "buys_24h": "number",
+          "sells_1m": "number",
+          "sells_5m": "number",
+          "sells_1h": "number",
+          "sells_6h": "number",
+          "sells_24h": "number",
+          "volume_1m": "string",
+          "volume_5m": "string",
+          "volume_1h": "string",
+          "volume_6h": "string",
+          "volume_24h": "string",
+          "buy_volume_1m": "string",
+          "buy_volume_5m": "string",
+          "buy_volume_1h": "string",
+          "buy_volume_6h": "string",
+          "buy_volume_24h": "string",
+          "sell_volume_1m": "string",
+          "sell_volume_5m": "string",
+          "sell_volume_1h": "string",
+          "sell_volume_6h": "string",
+          "sell_volume_24h": "string",
+          "swaps_1m": "number",
+          "swaps_5m": "number",
+          "swaps_1h": "number",
+          "swaps_6h": "number",
+          "swaps_24h": "number",
+          "hot_level": "number"
+        },
+        "pool": {
+          "address": "string",
+          "pool_address": "string",
+          "quote_address": "string",
+          "quote_symbol": "string",
+          "liquidity": "string",
+          "base_reserve": "string",
+          "quote_reserve": "string",
+          "initial_liquidity": "string",
+          "initial_base_reserve": "string",
+          "initial_quote_reserve": "string",
+          "creation_timestamp": "number",
+          "base_reserve_value": "string",
+          "quote_reserve_value": "string",
+          "quote_vault_address": "string",
+          "base_vault_address": "string",
+          "creator": "string",
+          "exchange": "string",
+          "token0_address": "string",
+          "token1_address": "string",
+          "base_address": "string",
+          "fee_ratio": "string"
+        },
+        "dev": {
+          "address": "string",
+          "creator_address": "string",
+          "creator_token_balance": "string",
+          "creator_token_status": "string",
+          "twitter_name_change_history": "array",
+          "top_10_holder_rate": "string",
+          "dexscr_ad": "number",
+          "dexscr_update_link": "number",
+          "cto_flag": "number",
+          "dexscr_boost_fee": "number",
+          "dexscr_trending_bar": "number",
+          "dexscr_ad_ts": "number",
+          "dexscr_update_link_ts": "number",
+          "dexscr_boost_ts": "number",
+          "dexscr_trending_bar_ts": "number",
+          "twitter_del_post_token_count": "number",
+          "twitter_create_token_count": "number",
+          "fund_from": "string",
+          "fund_from_ts": "number",
+          "creator_open_count": "number",
+          "offchain": "boolean",
+          "ath_token_info": "object"
+        },
+        "link": {
+          "address": "string",
+          "gmgn": "string",
+          "geckoterminal": "string",
+          "twitter_username": "string",
+          "website": "string",
+          "telegram": "string",
+          "bitbucket": "string",
+          "discord": "string",
+          "description": "string",
+          "facebook": "string",
+          "github": "string",
+          "instagram": "string",
+          "linkedin": "string",
+          "medium": "string",
+          "reddit": "string",
+          "tiktok": "string",
+          "youtube": "string",
+          "verify_status": "number",
+          "fracaster": "null"
+        },
+        "stat": {
+          "holder_count": "number",
+          "signal_count": "number",
+          "degen_call_count": "number",
+          "top_rat_trader_percentage": "string",
+          "top_bundler_trader_percentage": "string",
+          "top_entrapment_trader_percentage": "string",
+          "top_bot_degen_percentage": "string",
+          "creator_created_count": "number",
+          "bot_degen_count": "number",
+          "bot_degen_rate": "string",
+          "fresh_wallet_rate": "string",
+          "top_10_holder_rate": "string",
+          "dev_team_hold_rate": "string",
+          "creator_hold_rate": "string",
+          "creator_token_balance": "string",
+          "private_vault_hold_rate": "string",
+          "top70_sniper_hold_rate": "string"
+        },
+        "wallet_tags_stat": {
+          "smart_wallets": "number",
+          "fresh_wallets": "number",
+          "renowned_wallets": "number",
+          "creator_wallets": "number",
+          "sniper_wallets": "number",
+          "rat_trader_wallets": "number",
+          "whale_wallets": "number",
+          "top_wallets": "number",
+          "bundler_wallets": "number"
+        },
+        "fee_distribution": {
+          "launchpad": "string",
+          "platform_data": "null"
+        }
+      }
+    },
+    {
+      "path": "/v1/market/token_top_holders",
+      "shape": {
+        "list": {
+          "type": "array",
+          "length": 10,
+          "item": "object"
+        }
+      }
+    },
+    {
+      "path": "/v1/market/token_top_traders",
+      "shape": {
+        "list": {
+          "type": "array",
+          "length": 10,
+          "item": "object"
+        }
+      }
+    },
+    {
+      "path": "/v1/market/token_top_holders",
+      "shape": {
+        "list": {
+          "type": "array",
+          "length": 10,
+          "item": "object"
+        }
+      }
+    },
+    {
+      "path": "/v1/market/token_top_traders",
+      "shape": {
+        "list": {
+          "type": "array",
+          "length": 10,
+          "item": "object"
+        }
+      }
+    },
+    {
+      "path": "/v1/market/token_kline",
+      "shape": {
+        "list": {
+          "type": "array",
+          "length": 100,
+          "item": "object"
+        }
+      }
+    },
+    {
+      "path": "/v1/market/token_kline",
+      "shape": {
+        "list": {
+          "type": "array",
+          "length": 100,
+          "item": "object"
+        }
+      }
+    },
+    {
+      "path": "/v1/market/token_kline",
+      "shape": {
+        "list": {
+          "type": "array",
+          "length": 100,
+          "item": "object"
+        }
+      }
+    },
+    {
+      "path": "/v1/market/token_kline",
+      "shape": {
+        "list": {
+          "type": "array",
+          "length": 100,
+          "item": "object"
+        }
+      }
+    },
+    {
+      "path": "/v1/market/token_kline",
+      "shape": {
+        "list": {
+          "type": "array",
+          "length": 100,
+          "item": "object"
+        }
+      }
+    },
+    {
+      "path": "/v1/market/token_kline",
+      "shape": {
+        "list": {
+          "type": "array",
+          "length": 100,
+          "item": "object"
+        }
+      }
+    },
+    {
+      "path": "/v1/market/token_kline",
+      "shape": {
+        "list": {
+          "type": "array",
+          "length": 39,
+          "item": "object"
+        }
+      }
+    },
+    {
+      "path": "/v1/trade/quote",
+      "shape": {
+        "input_token": "string",
+        "output_token": "string",
+        "input_amount": "string",
+        "output_amount": "string",
+        "min_output_amount": "string",
+        "slippage": "number",
+        "tx": {
+          "chain_id": "number",
+          "to": "string",
+          "from_address": "string",
+          "slippage": "number",
+          "value": "string",
+          "amount_in": "string",
+          "amount_out": "string",
+          "amount_min_out": "string",
+          "input_token_address": "string",
+          "output_token_address": "string",
+          "type": "string",
+          "path": "array",
+          "steps": "array",
+          "token_in_usd_price": "string",
+          "amount_in_usd": "string",
+          "amount_in_decimals": "number",
+          "token_out_usd_price": "string",
+          "amount_out_usd": "string",
+          "amount_out_decimals": "number",
+          "token_launch_info": "object",
+          "is_implementation_latest": "boolean",
+          "is_fallback_native": "boolean",
+          "force_simulate": "boolean",
+          "is_test": "boolean",
+          "deadline": "number",
+          "gas_limit": "string",
+          "data": "string",
+          "approve_txs": "array"
+        }
+      }
+    },
+    {
+      "path": "/v1/trade/quote",
+      "shape": {
+        "input_token": "string",
+        "output_token": "string",
+        "input_amount": "string",
+        "output_amount": "string",
+        "min_output_amount": "string",
+        "slippage": "number",
+        "tx": {
+          "chain_id": "number",
+          "to": "string",
+          "from_address": "string",
+          "slippage": "number",
+          "value": "string",
+          "amount_in": "string",
+          "amount_out": "string",
+          "amount_min_out": "string",
+          "input_token_address": "string",
+          "output_token_address": "string",
+          "type": "string",
+          "path": "array",
+          "steps": "array",
+          "token_in_usd_price": "string",
+          "amount_in_usd": "string",
+          "amount_in_decimals": "number",
+          "token_out_usd_price": "string",
+          "amount_out_usd": "string",
+          "amount_out_decimals": "number",
+          "token_launch_info": "object",
+          "is_implementation_latest": "boolean",
+          "is_fallback_native": "boolean",
+          "force_simulate": "boolean",
+          "is_test": "boolean",
+          "deadline": "number",
+          "gas_limit": "string",
+          "data": "string",
+          "approve_txs": "array"
+        }
+      }
+    },
+    {
+      "path": "/v1/trade/quote",
+      "shape": {
+        "input_token": "string",
+        "output_token": "string",
+        "input_amount": "string",
+        "output_amount": "string",
+        "min_output_amount": "string",
+        "slippage": "number",
+        "tx": {
+          "chain_id": "number",
+          "to": "string",
+          "from_address": "string",
+          "slippage": "number",
+          "value": "string",
+          "amount_in": "string",
+          "amount_out": "string",
+          "amount_min_out": "string",
+          "input_token_address": "string",
+          "output_token_address": "string",
+          "type": "string",
+          "path": "array",
+          "steps": "array",
+          "token_in_usd_price": "string",
+          "amount_in_usd": "string",
+          "amount_in_decimals": "number",
+          "token_out_usd_price": "string",
+          "amount_out_usd": "string",
+          "amount_out_decimals": "number",
+          "token_launch_info": "object",
+          "is_implementation_latest": "boolean",
+          "is_fallback_native": "boolean",
+          "force_simulate": "boolean",
+          "is_test": "boolean",
+          "deadline": "number",
+          "gas_limit": "string",
+          "data": "string",
+          "approve_txs": "array"
+        }
+      }
+    },
+    {
+      "path": "/v1/trade/quote",
+      "shape": {
+        "input_token": "string",
+        "output_token": "string",
+        "input_amount": "string",
+        "output_amount": "string",
+        "min_output_amount": "string",
+        "slippage": "number",
+        "tx": {
+          "chain_id": "number",
+          "to": "string",
+          "from_address": "string",
+          "slippage": "number",
+          "value": "string",
+          "amount_in": "string",
+          "amount_out": "string",
+          "amount_min_out": "string",
+          "input_token_address": "string",
+          "output_token_address": "string",
+          "type": "string",
+          "path": "array",
+          "steps": "array",
+          "token_in_usd_price": "string",
+          "amount_in_usd": "string",
+          "amount_in_decimals": "number",
+          "token_out_usd_price": "string",
+          "amount_out_usd": "string",
+          "amount_out_decimals": "number",
+          "token_launch_info": "object",
+          "is_implementation_latest": "boolean",
+          "is_fallback_native": "boolean",
+          "force_simulate": "boolean",
+          "is_test": "boolean",
+          "deadline": "number",
+          "gas_limit": "string",
+          "data": "string",
+          "approve_txs": "array"
+        }
+      }
+    }
+  ]
+}
