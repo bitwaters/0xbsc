@@ -201,7 +201,7 @@ export class GmgnScheduler {
         if (jitter) await this.clock.sleep(jitter);
       }
       if (task.deadlineMs !== undefined && this.clock.now() >= task.deadlineMs)
-        throw new Error('task deadline expired');
+        throw new GmgnError('queue_timeout', 'task deadline expired in request queue');
       if (this.clock.now() < this.#blockedUntilMs) throw this.cooldownError();
       return await withGmgnContext(
         {
@@ -283,7 +283,7 @@ export class GmgnScheduler {
           if (item.task.deadlineMs !== undefined && now >= item.task.deadlineMs) {
             this.#queue.splice(this.#queue.indexOf(item), 1);
             if (item.task.key) this.#scheduledKeys.delete(item.task.key);
-            item.reject(new Error('task deadline expired'));
+            item.reject(new GmgnError('queue_timeout', 'task deadline expired in request queue'));
           }
         }
         if (now < this.#blockedUntilMs) {

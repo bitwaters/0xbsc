@@ -5,6 +5,8 @@ import { ResearchStorage } from './storage.js';
 import type { Storage } from '../storage/database.js';
 import { dirname, join } from 'node:path';
 import { ResearchArchive } from './archive.js';
+import { setImmediate as yieldToIO } from 'node:timers/promises';
+import { measureResearchInBackground } from './maintenance.js';
 
 /** Passive, bounded observer. It cannot call an API or feed the formal candidate queue. */
 export class ResearchRecorder {
@@ -13,6 +15,8 @@ export class ResearchRecorder {
   stoppedReason: string | null = null;
   private readonly events = new Map<string, NormalizedEvent>();
   private eventDrain = false;
+  private maintenanceRunning = false;
+  private closed = false;
   readonly archive: ResearchArchive;
   private maintenance: ReturnType<typeof setInterval> | null = null;
   constructor(
@@ -38,10 +42,23 @@ export class ResearchRecorder {
         this.stop('RESEARCH_RUN_NOT_ACTIVE');
         return;
       }
+      // In-memory databases are test-only and cannot be shared with a worker.
+      try {
+        if (this.research.storage.db.name !== ':memory:') await this.calibrate(false);
+      } catch {
+        this.stop('RESEARCH_QUOTA_CALIBRATION_FAILED');
+        return;
+      }
       this.maintenance = setInterval(
         () =>
           this.enqueue(async () => {
-            await this.archive.maintain(Date.now(), this.config.max_storage_bytes);
+            if (this.maintenanceRunning || this.closed) return;
+            this.maintenanceRunning = true;
+            try {
+              await this.calibrate(true);
+            } finally {
+              this.maintenanceRunning = false;
+            }
           }),
         60000
       );
@@ -76,7 +93,9 @@ export class ResearchRecorder {
     this.eventDrain = true;
     this.enqueue(async () => {
       try {
-        while (this.events.size && !this.stoppedReason) {
+        while (this.events.size && !this.stoppedReason && !this.closed) {
+          await yieldToIO();
+          if (this.closed || this.stoppedReason) break;
           const next = this.events.values().next().value!;
           this.events.delete(next.key);
           // One queued writer at a time lets formal work interleave with a large discovery batch.
@@ -100,7 +119,8 @@ export class ResearchRecorder {
       return;
     }
     this.pending++;
-    void operation()
+    void yieldToIO()
+      .then(() => (this.closed ? undefined : operation()))
       .catch(() => this.stop('RESEARCH_WRITE_FAILED'))
       .finally(() => {
         this.pending--;
@@ -122,7 +142,20 @@ export class ResearchRecorder {
       })
       .catch(() => undefined);
   }
+  private async calibrate(maintain: boolean): Promise<void> {
+    if (this.research.storage.db.name === ':memory:') return;
+    const checkpoint = this.research.quotaCheckpoint();
+    const bytes = await measureResearchInBackground(
+      this.research.storage,
+      join(dirname(this.research.storage.db.name), 'research-archives'),
+      this.config.max_storage_bytes,
+      maintain
+    );
+    if (!this.closed) this.research.calibrateQuota(bytes, checkpoint);
+  }
   close(): void {
+    this.closed = true;
+    this.events.clear();
     if (this.maintenance) clearInterval(this.maintenance);
     this.maintenance = null;
   }

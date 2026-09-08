@@ -153,7 +153,8 @@ export class GmgnClient {
         undefined,
         context.correlationId,
         context.purpose,
-        research
+        research,
+        deadlineMs
       );
     const weight = this.options.weights?.[endpoint];
     if (!weight || !Number.isFinite(weight))
@@ -172,7 +173,8 @@ export class GmgnClient {
           admission,
           context.correlationId,
           context.purpose,
-          research
+          research,
+          deadlineMs
         )
     });
   }
@@ -184,9 +186,16 @@ export class GmgnClient {
     admission?: Admission,
     correlationId?: string,
     purpose: RequestPurpose = 'legacy_formal',
-    research = false
+    research = false,
+    deadlineMs = (this.options.now?.() ?? Date.now()) + 30000
   ): Promise<T> {
     const startedAtMs = this.options.now?.() ?? Date.now();
+    if (startedAtMs >= deadlineMs)
+      throw new GmgnError('queue_timeout', 'task deadline expired in request queue');
+    input = {
+      ...input,
+      absoluteTimeoutMs: Math.min(input.absoluteTimeoutMs ?? 30000, deadlineMs - startedAtMs)
+    };
     const token = typeof input.query?.address === 'string' ? input.query.address.toLowerCase() : '';
     // Bind ancillary responses to the pool known when the physical request starts.
     // A later Info response cannot relabel an older request across a migration.
@@ -288,7 +297,11 @@ export class GmgnClient {
       );
     }
     if (response.status < 200 || response.status >= 300) {
-      observe(response.status, 'error', `GMGN returned HTTP ${response.status}`);
+      observe(
+        response.status,
+        'error',
+        JSON.stringify(httpFailureDiagnostic(response, this.options.apiKey))
+      );
       throw new GmgnError('http', `GMGN returned HTTP ${response.status}`, response.status);
     }
     const body = response.body as Record<string, unknown> | null;
@@ -302,6 +315,10 @@ export class GmgnClient {
       throw new GmgnError('schema', 'GMGN business code or response data invalid', response.status);
     }
     const completedAtMs = this.options.now?.() ?? Date.now();
+    if (completedAtMs >= deadlineMs) {
+      observe(response.status, 'timeout', 'GMGN response arrived after request deadline');
+      throw new GmgnError('timeout', 'GMGN response arrived after request deadline');
+    }
     timings.set(response.body as object, {
       requestedAtMs: startedAtMs,
       completedAtMs
@@ -415,7 +432,7 @@ export function redact(value: string, secret: string): string {
   return value.replaceAll(secret, '[REDACTED]');
 }
 
-function nodeHttpsTransport(baseUrl: string): HttpTransport {
+export function nodeHttpsTransport(baseUrl: string): HttpTransport {
   const url = new URL(baseUrl);
   const agent = new Agent({ keepAlive: true, family: 4 });
   return async <T>(
@@ -440,6 +457,8 @@ function nodeHttpsTransport(baseUrl: string): HttpTransport {
       const req = request(options, (res) => {
         const chunks: Buffer[] = [];
         res.on('data', (chunk: Buffer) => chunks.push(chunk));
+        res.on('error', reject);
+        res.on('aborted', () => reject(new GmgnError('network', 'GMGN response aborted')));
         res.on('end', () => {
           const text = Buffer.concat(chunks).toString('utf8');
           try {
@@ -468,5 +487,40 @@ function nodeHttpsTransport(baseUrl: string): HttpTransport {
       if (payload) req.write(payload);
       req.end();
     });
+  };
+}
+
+/** Classifications only: never persist arbitrary response messages or echoed credentials. */
+export function httpFailureDiagnostic(response: HttpResponse<unknown>, secret: string) {
+  const body =
+    response.body && typeof response.body === 'object'
+      ? (response.body as Record<string, unknown>)
+      : {};
+  const message = (safeScalar(body.message ?? body.msg ?? body.error) ?? '').toLowerCase();
+  const classification = /timestamp|expired|clock/.test(message)
+    ? 'request_time'
+    : /ip|whitelist|allowlist/.test(message)
+      ? 'ip_policy'
+      : /key|token|auth|signature/.test(message)
+        ? 'authentication'
+        : 'unclassified';
+  const safeId = (value: unknown): string | null => {
+    if (typeof value !== 'string' || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(value)) return null;
+    return redact(value, secret);
+  };
+  return {
+    status: response.status,
+    classification,
+    requestId: safeId(
+      response.headers['x-request-id'] ??
+        response.headers['x-trace-id'] ??
+        response.headers['cf-ray']
+    ),
+    serverDate:
+      typeof response.headers.date === 'string' &&
+      Number.isFinite(Date.parse(response.headers.date))
+        ? new Date(response.headers.date).toISOString()
+        : null,
+    jsonBody: response.body !== null && typeof response.body === 'object'
   };
 }

@@ -1,3 +1,4 @@
+import { BusinessHealth } from './observability/business-health.js';
 import { dirname, join } from 'node:path';
 import { writeFileSync } from 'node:fs';
 import { LimiterStateFile } from './gmgn/limiter-state.js';
@@ -78,6 +79,7 @@ const repairTasks = await storage.requeueIncompletePaths(Date.now());
 if (repairTasks)
   console.log(JSON.stringify({ event: 'historical_path_repairs_queued', count: repairTasks }));
 const metrics = new MetricsCollector();
+const businessHealth = new BusinessHealth(() => clock.now());
 await storage.recordConfigRevision(loaded.revisionId, loaded.sanitizedSnapshot, clock.now());
 await storage.expireOutdatedConfiguration(loaded.revisionId, clock.now());
 const recoveredReady = await storage.recoverReadyCandidates(
@@ -129,6 +131,7 @@ const api = new GmgnApi(
       )
         scheduler.setResearchMonitoringHealthy(false);
       const endpoint = apiMetricEndpoint(observation.input.path);
+      businessHealth.api(endpoint, observation);
       void storage
         .recordApiObservation({
           endpoint,
@@ -257,7 +260,9 @@ const processCandidate = (
           });
           return;
         }
+        businessHealth.safetyStarted();
         let result = await safety.process(event, { priority: options.priority ?? 'candidate' });
+        businessHealth.safetyFinished();
         if (result.allowed && !result.usedCache) metrics.increment('deepAnalyses');
         if (!result.allowed) {
           if (options.researchOnly) await storage.removeCandidateWatch(event.tokenAddress);
@@ -308,6 +313,7 @@ const processCandidate = (
             clock.now(),
             shadowDecision
           );
+          businessHealth.shadowFinished();
           if (options.researchOnly)
             await storage.updateWatchSnapshot(
               event.tokenAddress,
@@ -817,6 +823,8 @@ const processCandidate = (
           );
       }
     ).catch(async (error: unknown) => {
+      if (error instanceof GmgnError && error.kind === 'queue_timeout')
+        businessHealth.queueExpired();
       await timeline.record('decision', {
         decision: 'processing_error',
         reason: error instanceof GmgnError ? error.kind : 'processing_failure',
@@ -1072,9 +1080,15 @@ const metricTimer = setInterval(() => {
     .retainAudit(clock.now(), loaded.config.storage.raw_payload_retention_days)
     .then(() => metrics.snapshot(storage, clock.now()))
     .then((snapshot) => {
-      scheduler.setResearchMonitoringHealthy(true);
+      const business = businessHealth.snapshot(true);
+      scheduler.setResearchMonitoringHealthy(business.status === 'ready');
       console.log(
-        JSON.stringify({ event: 'runtime_metrics', ...snapshot, gmgn: scheduler.snapshot() })
+        JSON.stringify({
+          event: 'runtime_metrics',
+          ...snapshot,
+          gmgn: scheduler.snapshot(),
+          business
+        })
       );
     })
     .catch((error: unknown) => {
@@ -1096,6 +1110,7 @@ const writeHealth = () =>
     JSON.stringify({
       atMs: clock.now(),
       revision: loaded.revisionId,
+      business: businessHealth.snapshot(),
       gmgn: scheduler.snapshot(),
       research: {
         mode: loaded.config.research?.mode ?? 'off',
@@ -1114,6 +1129,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const)
   process.once(signal, () => {
     if (researchTimer) clearInterval(researchTimer);
     researchRecorder?.close();
+    businessHealth.close();
     clearInterval(dueTimer);
     clearInterval(telegramPollTimer);
     clearInterval(outboxDeliveryTimer);

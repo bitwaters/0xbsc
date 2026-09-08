@@ -7,6 +7,25 @@ import type { OpportunityState } from '../decision/opportunity.js';
 
 export class ResearchStorage {
   constructor(readonly storage: Storage) {}
+  private quota: { bytes: number; reserved: number } | null = null;
+  quotaCheckpoint(): number {
+    return this.quota?.reserved ?? 0;
+  }
+  calibrateQuota(bytes: number, checkpoint: number): void {
+    const reserved = this.quota?.reserved ?? 0;
+    this.quota = { bytes: bytes + Math.max(0, reserved - checkpoint), reserved };
+  }
+  /** Conservative reservations between off-thread page measurements; never release on failure. */
+  private reserveBytes(bytes: number, maxBytes: number): boolean {
+    if (!this.quota) return this.estimatedBytes() + bytes <= maxBytes;
+    if (this.quota.bytes + bytes > maxBytes) return false;
+    this.quota.bytes += bytes;
+    this.quota.reserved += bytes;
+    return true;
+  }
+  quotaBytes(): number | null {
+    return this.quota?.bytes ?? null;
+  }
   saveOpportunity(
     runId: string,
     state: OpportunityState,
@@ -109,18 +128,6 @@ export class ResearchStorage {
       const { payload, ...envelope } = fact;
       const payloadJson = canonicalJson(payload),
         envelopeJson = canonicalJson(envelope);
-      if (
-        this.estimatedBytes() +
-          Buffer.byteLength(payloadJson) +
-          Buffer.byteLength(envelopeJson) +
-          4096 >
-        maxBytes
-      ) {
-        this.storage.db
-          .prepare("UPDATE research_runs SET status='STORAGE_BUDGET_EXHAUSTED' WHERE run_id=?")
-          .run(runId);
-        return false;
-      }
       const existing = this.storage.db
         .prepare(
           'SELECT fact_id,semantic_hash,envelope_json FROM research_facts WHERE attempt_id=? AND endpoint=?'
@@ -134,6 +141,19 @@ export class ResearchStorage {
           existing.envelope_json !== envelopeJson)
       )
         throw new Error('conflicting physical response');
+      if (existing) return false;
+      if (
+        !this.reserveBytes(
+          2 * (Buffer.byteLength(payloadJson) + Buffer.byteLength(envelopeJson)) + 65536,
+          maxBytes
+        )
+      ) {
+        this.storage.db
+          .prepare("UPDATE research_runs SET status='STORAGE_BUDGET_EXHAUSTED' WHERE run_id=?")
+          .run(runId);
+        return false;
+      }
+
       return (
         this.storage.db
           .prepare(
@@ -201,7 +221,20 @@ export class ResearchStorage {
         .prepare('SELECT status,sampling_epoch FROM research_runs WHERE run_id=?')
         .get(runId) as { status: string; sampling_epoch: number } | undefined;
       if (!run || run.status !== 'ACTIVE') return;
-      if (this.estimatedBytes() + 16384 > maxBytes) {
+      const known = this.storage.db
+        .prepare(
+          'SELECT 1 FROM research_sampling WHERE run_id=? AND chain=? AND token=? AND pool_revision=?'
+        )
+        .get(
+          runId,
+          event.chain,
+          event.tokenAddress,
+          typeof event.payload.biggest_pool_address === 'string' &&
+            /^0x[0-9a-f]{40}$/i.test(event.payload.biggest_pool_address)
+            ? event.payload.biggest_pool_address.toLowerCase()
+            : 'unresolved'
+        );
+      if (!this.reserveBytes(known ? 128 : 65536 + 2 * Buffer.byteLength(event.key), maxBytes)) {
         this.storage.db
           .prepare("UPDATE research_runs SET status='STORAGE_BUDGET_EXHAUSTED' WHERE run_id=?")
           .run(runId);
@@ -265,19 +298,18 @@ export class ResearchStorage {
           const row = group[rank];
           if (row && selected.size < capacity) selected.add(row.rowid);
         }
+      const updateSample = this.storage.db.prepare(
+        'UPDATE research_sampling SET status=?,inclusion_probability=?,updated_at_ms=? WHERE rowid=?'
+      );
       for (const group of groups.values()) {
         const probability = group.filter((row) => selected.has(row.rowid)).length / group.length;
         for (const row of group)
-          this.storage.db
-            .prepare(
-              'UPDATE research_sampling SET status=?,inclusion_probability=?,updated_at_ms=? WHERE rowid=?'
-            )
-            .run(
-              selected.has(row.rowid) ? 'SELECTED' : 'RESOURCE_EXCLUDED',
-              probability,
-              event.observedAtMs,
-              row.rowid
-            );
+          updateSample.run(
+            selected.has(row.rowid) ? 'SELECTED' : 'RESOURCE_EXCLUDED',
+            probability,
+            event.observedAtMs,
+            row.rowid
+          );
       }
     });
   }

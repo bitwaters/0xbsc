@@ -27,5 +27,5 @@ COPY --chown=signalbot:signalbot package.json package-lock.json ./
 COPY --from=verification --chown=signalbot:signalbot /app/dist ./dist
 COPY --chown=signalbot:signalbot src/storage/migrations ./dist/storage/migrations
 USER signalbot
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD node -e "const s=JSON.parse(require('node:fs').readFileSync('/tmp/gmgn-runtime-health.json','utf8')); if(Date.now()-s.atMs>20000) process.exit(1)"
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD node -e "const s=JSON.parse(require('node:fs').readFileSync('/tmp/gmgn-runtime-health.json','utf8')); if(Date.now()-s.atMs>20000 || s.business?.status==='degraded') process.exit(1)"
 ENTRYPOINT ["node", "dist/index.js"]
