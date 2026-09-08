@@ -97,7 +97,7 @@ export function evaluateOpportunity(
       },
       'OPPORTUNITY_DEADLINE'
     );
-  if (missing.length || Object.values(predicates).includes('UNKNOWN'))
+  if (missing.length || predicates.activation === 'UNKNOWN')
     return result(previous, 'DATA_WAIT', missing);
   const latest = fieldSamples(input.model.price_field, input).at(-1)!;
   if (
@@ -121,7 +121,10 @@ export function evaluateOpportunity(
         },
         'CACHED_MARKET_INVALIDATED'
       );
-    return result(previous, 'NO_NEW_FACT');
+    return result(
+      previous,
+      Object.values(predicates).includes('UNKNOWN') ? 'DATA_WAIT' : 'NO_NEW_FACT'
+    );
   }
   const state = {
     ...previous,
@@ -131,6 +134,7 @@ export function evaluateOpportunity(
     version: previous.version + 1
   };
   if (['INVALIDATED', 'MISSED', 'CONSUMED'].includes(state.status)) {
+    if (predicates.reset === 'UNKNOWN') return result(previous, 'DATA_WAIT');
     if (predicates.reset === 'PASS' && predicates.activation === 'FAIL')
       return result(
         { ...state, status: 'WATCHING', resetArmed: true, lastActivation: false },
@@ -160,6 +164,9 @@ export function evaluateOpportunity(
     return result({ ...state, status: 'INVALIDATED', resetArmed: false }, 'ANCHOR_ENTRY_EXCEEDED');
   if (predicates.invalidation === 'PASS' || predicates.entry === 'FAIL')
     return result({ ...state, status: 'INVALIDATED', resetArmed: false }, 'MARKET_INVALIDATED');
+  // Activation fixes the first anchor even while a multi-sample confirmation is incomplete.
+  // Unknown later gates still forbid preparation, but cannot silently shift the anchor to a later price.
+  if (Object.values(predicates).includes('UNKNOWN')) return result(state, 'DATA_WAIT', missing);
   if (predicates.confirmation === 'PASS')
     return result({ ...state, status: 'READY' }, 'MARKET_READY_RESEARCH_ONLY');
   if (previous.status === 'READY')

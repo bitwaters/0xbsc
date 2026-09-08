@@ -215,3 +215,39 @@ void test('a refreshed READY price cannot move the original entry anchor', () =>
   assert.equal(next.state.status, 'INVALIDATED');
   assert.equal(next.state.anchorPrice, '1.3');
 });
+
+void test('first activation fixes the anchor before the confirmation window has enough samples', () => {
+  const model = validateModel({
+    ...definition,
+    max_entry_anchor_multiple: 1.08,
+    confirmation: {
+      op: 'gte',
+      args: [
+        { field: 'price' },
+        { window: { field: 'price', ms: 30000, aggregate: 'mean', min_samples: 2 } }
+      ]
+    }
+  });
+  const first = fact('1.3', 1000);
+  const input = {
+    model: model.manifest,
+    token,
+    poolRevision: pool,
+    facts: [first],
+    evaluationAtMs: 1000
+  };
+  const started = evaluateOpportunity(watchingState(token, pool, model.hash), input, model.hash);
+  assert.equal(started.reason, 'DATA_WAIT');
+  assert.equal(started.state.status, 'START_CANDIDATE');
+  assert.equal(started.state.anchorPrice, '1.3');
+  assert.equal(started.state.anchorAtMs, 1000);
+  assert.equal(evaluateOpportunity(started.state, input, model.hash).reason, 'DATA_WAIT');
+  const tooLate = evaluateOpportunity(
+    started.state,
+    { ...input, facts: [first, fact('1.5', 2000)], evaluationAtMs: 2000 },
+    model.hash
+  );
+  assert.equal(tooLate.reason, 'ANCHOR_ENTRY_EXCEEDED');
+  assert.equal(tooLate.state.anchorPrice, '1.3');
+  assert.equal(tooLate.state.anchorAtMs, 1000);
+});
