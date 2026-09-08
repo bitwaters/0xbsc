@@ -3,7 +3,19 @@ import type { ShadowPolicy } from '../decision/shadow.js';
 export type RouteName = 'new_launch' | 'revival' | 'continuation';
 
 export interface RuntimeConfig {
-  research?: { mode: 'off' | 'observe'; run_id: string; max_storage_bytes: number } | undefined;
+  publication?:
+    | { engine: 'legacy' }
+    | { engine: 'validated'; model_hash: string; certificate_path: string }
+    | undefined;
+  research?:
+    | {
+        mode: 'off' | 'observe' | 'collect' | 'execute_shadow';
+        run_id: string;
+        max_storage_bytes: number;
+        manifest_path?: string | undefined;
+        budget_evidence_path?: string | undefined;
+      }
+    | undefined;
   optimization: ShadowPolicy;
   runtime: { chain: 'bsc'; mode: 'dry_run' | 'live' };
   gmgn: {

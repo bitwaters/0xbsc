@@ -23,6 +23,10 @@ import { SafetyRuntime } from './safety/runtime.js';
 import { LazySafetyRuntime } from './safety/lazy-runtime.js';
 import { Storage } from './storage/database.js';
 import { ResearchRecorder } from './research/recorder.js';
+import { ResearchRuntime, loadResearchModel } from './research/runtime.js';
+import { researchBudgetContractHash } from './research/budget-check.js';
+import { riskPolicyHash } from './decision/preparation.js';
+import { protocolHash } from './research/protocol.js';
 import type { MarketFact } from './gmgn/facts.js';
 import { PublicationGuard } from './delivery/publication-guard.js';
 import { TelegramClient } from './delivery/telegram.js';
@@ -44,6 +48,7 @@ import { Decimal } from 'decimal.js';
 
 const configPath = process.argv[2] ?? `${process.env.HOME}/.config/gmgn-signal-bot/config.yaml`;
 const loaded = await loadRuntimeConfig(configPath);
+const researchModel = loadResearchModel(loaded.config);
 const clock: Clock = {
   now: () => Date.now(),
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -51,12 +56,24 @@ const clock: Clock = {
 };
 const storage = await Storage.open(loaded.config.storage.sqlite_path);
 const researchRecorder =
-  loaded.config.research?.mode === 'observe'
+  loaded.config.research && loaded.config.research.mode !== 'off'
     ? new ResearchRecorder(storage, loaded.config.research, (reason) =>
         console.error(JSON.stringify({ event: 'research_recording_stopped', reason }))
       )
     : null;
-await researchRecorder?.start(clock.now());
+await researchRecorder?.start(
+  clock.now(),
+  loaded.config.research && ['collect', 'execute_shadow'].includes(loaded.config.research.mode)
+    ? {
+        ...loaded.config.research,
+        modelHash: researchModel?.hash ?? null,
+        riskHash: riskPolicyHash(loaded.config),
+        budgetContractHash: researchBudgetContractHash(),
+        marketProtocolHash: protocolHash('post_confirmation_market_v1'),
+        quoteProtocolHash: protocolHash('post_confirmation_quote_v1')
+      }
+    : undefined
+);
 const repairTasks = await storage.requeueIncompletePaths(Date.now());
 if (repairTasks)
   console.log(JSON.stringify({ event: 'historical_path_repairs_queued', count: repairTasks }));
@@ -81,6 +98,7 @@ const scheduler = new GmgnScheduler(
   loaded.config.gmgn.rate_limit.burst_reserve_weight,
   {
     paced: true,
+    researchEnabled: ['collect', 'execute_shadow'].includes(loaded.config.research?.mode ?? 'off'),
     maxConcurrent: loaded.config.gmgn.rate_limit.max_in_flight ?? 4,
     channelIntervalsMs: { quote: loaded.config.gmgn.rate_limit.quote_min_interval_ms ?? 600 },
     channelCompletionIntervalsMs: {
@@ -90,6 +108,7 @@ const scheduler = new GmgnScheduler(
     persistState: (state) => limiterState.save(state)
   }
 );
+scheduler.setResearchMonitoringHealthy(false);
 const api = new GmgnApi(
   new GmgnClient({
     baseUrl: loaded.config.gmgn.base_url,
@@ -104,6 +123,11 @@ const api = new GmgnApi(
         }
       : {}),
     onObservation: (observation) => {
+      if (
+        observation.attempt?.priority === 'formal' &&
+        observation.attempt.startedAtMs - observation.attempt.queuedAtMs > 3000
+      )
+        scheduler.setResearchMonitoringHealthy(false);
       const endpoint = apiMetricEndpoint(observation.input.path);
       void storage
         .recordApiObservation({
@@ -117,7 +141,10 @@ const api = new GmgnApi(
           ...(observation.attempt ? { attempt: observation.attempt } : {}),
           ...(observation.detail === undefined ? {} : { detail: observation.detail })
         })
-        .catch(() => console.error(JSON.stringify({ event: 'api_audit_write_failed' })));
+        .catch(() => {
+          scheduler.setResearchMonitoringHealthy(false);
+          console.error(JSON.stringify({ event: 'api_audit_write_failed' }));
+        });
       if (observation.kind === 'rate_limit')
         console.error(
           JSON.stringify({ event: 'gmgn_rate_limit', endpoint, attempt: observation.attempt })
@@ -133,6 +160,16 @@ const candidateApi = new ScheduledCandidateGmgnApi(
   clock,
   loaded.config.gmgn.endpoint_weights
 );
+const researchRuntime =
+  researchRecorder && ['collect', 'execute_shadow'].includes(researchRecorder.config.mode)
+    ? new ResearchRuntime(researchRecorder, loaded.config, api, clock)
+    : null;
+await researchRuntime?.start();
+const researchTimer = researchRuntime
+  ? setInterval(() => {
+      void researchRuntime.tick().catch(() => researchRecorder?.stop('RESEARCH_RUNTIME_FAILED'));
+    }, 1000)
+  : null;
 const safety = new SafetyRuntime(loaded.config, candidateApi, () => clock.now());
 const lazySafety = new LazySafetyRuntime(loaded.config, candidateApi, () => clock.now());
 const routes = new RouteRuntime(loaded.config, candidateApi, () => clock.now());
@@ -807,8 +844,11 @@ const outboxDelivery = new OutboxDeliveryService({
     if (typeof correlationId === 'string')
       await storage.recordOperationTrace({ correlationId, stage, occurredAtMs });
   },
-  onConfirmed: (signal, confirmedAtMs) =>
-    withGmgnContext({ purpose: 'baseline' }, async () => {
+  onConfirmed: (signal, confirmedAtMs) => {
+    void researchRuntime
+      ?.confirmed(signal, confirmedAtMs)
+      .catch(() => researchRecorder?.stop('ACTUAL_BASELINE_CAPTURE_FAILED'));
+    return withGmgnContext({ purpose: 'baseline' }, async () => {
       const decision = asRecord(signal.decision);
       const tokenAddress = requiredString(decision.tokenAddress, 'tokenAddress');
       const provider = await GmgnQuoteProvider.create({
@@ -823,7 +863,8 @@ const outboxDelivery = new OutboxDeliveryService({
         sizesUsd: loaded.config.quote.position_usd,
         now: () => clock.now()
       });
-    }),
+    });
+  },
   onConfirmedError: (signal, error) =>
     console.error(
       JSON.stringify({
@@ -1030,19 +1071,21 @@ const metricTimer = setInterval(() => {
   void storage
     .retainAudit(clock.now(), loaded.config.storage.raw_payload_retention_days)
     .then(() => metrics.snapshot(storage, clock.now()))
-    .then((snapshot) =>
+    .then((snapshot) => {
+      scheduler.setResearchMonitoringHealthy(true);
       console.log(
         JSON.stringify({ event: 'runtime_metrics', ...snapshot, gmgn: scheduler.snapshot() })
-      )
-    )
-    .catch((error: unknown) =>
+      );
+    })
+    .catch((error: unknown) => {
+      scheduler.setResearchMonitoringHealthy(false);
       console.error(
         JSON.stringify({
           event: 'runtime_metrics_failed',
           error: error instanceof Error ? error.message : 'unknown error'
         })
-      )
-    )
+      );
+    })
     .finally(() => {
       metricSnapshotRunning = false;
     });
@@ -1069,6 +1112,7 @@ const healthTimer = setInterval(writeHealth, 5000);
 console.log(JSON.stringify({ event: 'discovery_started', revision_id: loaded.revisionId }));
 for (const signal of ['SIGINT', 'SIGTERM'] as const)
   process.once(signal, () => {
+    if (researchTimer) clearInterval(researchTimer);
     researchRecorder?.close();
     clearInterval(dueTimer);
     clearInterval(telegramPollTimer);

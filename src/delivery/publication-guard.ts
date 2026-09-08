@@ -6,7 +6,8 @@ export const PUBLICATION_COMPATIBILITY = 'global-token-lock-v1';
 export class PublicationGuard {
   constructor(
     private readonly storage: Storage,
-    private readonly now: () => number = Date.now
+    private readonly now: () => number = Date.now,
+    private readonly format: 'legacy-v1' | 'opportunity-v1' = 'legacy-v1'
   ) {}
   acquire(): Promise<string | null> {
     return this.storage.transaction(() => {
@@ -51,9 +52,9 @@ export class PublicationGuard {
         return false;
       const row = db
         .prepare(
-          "SELECT e.chain,e.token_address AS token FROM signals s JOIN episodes e ON e.id=s.episode_id WHERE s.id=? AND s.delivery_state='PENDING' AND s.decision_format='legacy-v1'"
+          "SELECT e.chain,e.token_address AS token FROM signals s JOIN episodes e ON e.id=s.episode_id WHERE s.id=? AND s.delivery_state='PENDING' AND s.decision_format=?"
         )
-        .get(signalId) as { chain: string; token: string } | undefined;
+        .get(signalId, this.format) as { chain: string; token: string } | undefined;
       if (!row) return false;
       // Never automatically replace a reservation, including one left by a crashed sender.
       return (

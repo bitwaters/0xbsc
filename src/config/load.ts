@@ -83,9 +83,23 @@ const lazyDeepSafety = z
 export const runtimeConfigSchema = z
   .object({
     runtime: z.object({ chain: z.literal('bsc'), mode: z.enum(['dry_run', 'live']) }).strict(),
+    publication: z
+      .discriminatedUnion('engine', [
+        z.object({ engine: z.literal('legacy') }).strict(),
+        z
+          .object({
+            engine: z.literal('validated'),
+            model_hash: z.string().regex(/^[a-f0-9]{64}$/),
+            certificate_path: z.string().min(1)
+          })
+          .strict()
+      ])
+      .optional(),
     research: z
       .object({
-        mode: z.enum(['off', 'observe']),
+        mode: z.enum(['off', 'observe', 'collect', 'execute_shadow']),
+        manifest_path: z.string().min(1).optional(),
+        budget_evidence_path: z.string().min(1).optional(),
         run_id: z.string().regex(/^[a-zA-Z0-9_-]{1,100}$/),
         max_storage_bytes: z
           .number()
@@ -299,7 +313,7 @@ export async function loadRuntimeConfig(path: string): Promise<LoadedConfig> {
     throw new ConfigError('GMGN and Telegram credentials must be configured before startup');
   const researchMode = process.env.RESEARCH_MODE ?? env?.RESEARCH_MODE;
   if (researchMode !== undefined) {
-    const mode = z.enum(['off', 'observe']).safeParse(researchMode);
+    const mode = z.enum(['off', 'observe', 'collect', 'execute_shadow']).safeParse(researchMode);
     const runId = z
       .string()
       .regex(/^[a-zA-Z0-9_-]{1,80}$/)
@@ -307,11 +321,21 @@ export async function loadRuntimeConfig(path: string): Promise<LoadedConfig> {
     if (!mode.success || !runId.success)
       throw new ConfigError('invalid research environment override');
     parsed.data.research = {
+      ...parsed.data.research,
       mode: mode.data,
       run_id: runId.data,
       max_storage_bytes: parsed.data.research?.max_storage_bytes ?? 2147483648
     };
   }
+  if (
+    parsed.data.research?.mode === 'execute_shadow' &&
+    (!parsed.data.research.manifest_path || !parsed.data.research.budget_evidence_path)
+  )
+    throw new ConfigError('research: SHADOW_MANIFEST_AND_BUDGET_REQUIRED');
+  if (parsed.data.publication?.engine === 'validated')
+    throw new ConfigError(
+      'VALIDATED_FORBIDS_LEGACY_MARKET_KEYS: activation requires the stage E configuration and matching promotion evidence'
+    );
   assertCrossFieldRules(parsed.data);
   const sanitizedSnapshot = redactSecrets(parsed.data) as Record<string, unknown>;
   // Passive research settings must not expire legacy candidates or pending deliveries.

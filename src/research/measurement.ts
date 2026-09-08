@@ -81,6 +81,8 @@ export function marketBaseline(input: {
 }
 
 export interface QuoteObservation {
+  /** Requested USD size before conversion to integer native-token atoms; returned USD is kept separately. */
+  requestedNotionalUsd?: '10';
   factId: string;
   chain: 'bsc';
   token: string;
@@ -115,11 +117,13 @@ export function quoteReuseKey(
     quote.direction,
     quote.inputAmount,
     quote.slippage,
-    quote.semantics
+    quote.semantics,
+    quote.requestedNotionalUsd ?? null
   ]);
 }
 export function quoteBaseline(quote: QuoteObservation, confirmationAtMs: number): BaselineValue {
   if (
+    ![quote.requestedAtMs, quote.receivedAtMs, confirmationAtMs].every(Number.isSafeInteger) ||
     quote.direction !== 'buy' ||
     quote.requestedAtMs < confirmationAtMs ||
     quote.receivedAtMs < quote.requestedAtMs ||
@@ -129,7 +133,8 @@ export function quoteBaseline(quote: QuoteObservation, confirmationAtMs: number)
     return absent('MISSING', 'QUOTE_PHYSICAL_DEADLINE');
   const quantity = decimalValue(quote.outputAmount),
     cost = decimalValue(quote.inputUsd);
-  if (!quantity?.gt(0) || !cost?.eq(10)) return absent('UNVERIFIED', 'QUOTE_QUANTITY_OR_COST');
+  if (!quantity?.gt(0) || !cost?.gt(0) || (quote.requestedNotionalUsd !== '10' && !cost.eq(10)))
+    return absent('UNVERIFIED', 'QUOTE_QUANTITY_OR_COST');
   return {
     status: 'VALID',
     reason: 'SIMULATED_QUOTE_NOT_FILL',
@@ -141,6 +146,11 @@ export function quoteBaseline(quote: QuoteObservation, confirmationAtMs: number)
 }
 export function pairedQuoteReturn(buy: QuoteObservation, sell: QuoteObservation): string | null {
   if (
+    ![buy.requestedAtMs, buy.receivedAtMs, sell.requestedAtMs, sell.receivedAtMs].every(
+      Number.isSafeInteger
+    ) ||
+    buy.receivedAtMs < buy.requestedAtMs ||
+    buy.receivedAtMs - buy.requestedAtMs > p.physicalTimeoutMs ||
     buy.direction !== 'buy' ||
     sell.direction !== 'sell' ||
     buy.outputAmount !== sell.inputAmount ||

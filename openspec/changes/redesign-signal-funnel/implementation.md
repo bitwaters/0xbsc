@@ -1,3 +1,42 @@
+# 2026-09-08 本批实施状态（优先于下方历史记录）
+
+实施任务30/39；本批交付研究采集、完整风险/报价干运行、持久化三轨基准、结果/退出采集、有限候选与选择工具、最终运行登记/消费/评价/凭据验证。正式publisher仍legacy，SEA继续observe。**提案尚未全部完成，也没有新规则已提高命中率的证明。**
+
+本批新增完成：2.5、2.7、3.1、3.2、3.4、3.5、4.2–4.5、6.1、6.4。4.5的勾选表示负载测量工具和拒绝不充分证据的门禁完成，不代表线上研究已经获准启用。部署实测另见deployment.md。
+
+## 已交付的工程
+
+- `decision/preparation.ts`先做原安全核验，再记录市场合格坐标，随后10U买腿/同数量卖腿/最终风险和原模型复核。失败取消原机会，保持锚点；安全未验证者不进入执行分母或报价。
+- `research/runtime.ts`接入collect与单模型execute_shadow，共用既有GmgnClient/scheduler；observe不新增请求。源数据窗口超过5000事实明确排除，不截取后假装完整。最终复核只刷新Info/security/pool，深度数据按原TTL核验。
+- ACTUAL确认接在既有outbox确认回调，先核对持久化SENT/确认时间；SIMULATED固定为准备完成时刻+1000ms。准备完成时间先冻结，重启不重做报价、不移动基准；未完成准备没有虚拟确认时间。
+- 基准PENDING先落库、CAS终态及持久化attempt；研究HTTP自动重试关闭，由持久化任务控制2/1/3次上限。正式请求原重试策略不变；attempt新增research标记，负载对照剔除研究自身流量。
+- 市场结果按1.3/1.5/2/3倍和0.9先触达，24h观察、2h补采；200待办是市场任务与Quote退出的共同上限。范围缓存检查完整性、身份和归档引用；缺口保留UNKNOWN/CENSORED。
+- Quote独立保存名义请求10U和返回实际美元金额，避免整数WBNB换算使合法报价永远无法满足“恰等于10”。协议升为v2，哈希隔离旧口径；卖出只能配对原买入数量，晚到只能报告实际可用时刻。
+- 有限候选生成最多3×4；注册分位数输入必须追溯开发数据集fact与字段值。选择前冻结候选、风险、legacy对照及语义构建；离线相同事实/事件回放，新旧都做同一安全检查，执行证据保持NOT_EVALUATED。
+- 最终登记固定30天+26h、一次解封；提前使用不可撤回地消费数据。evaluate-final从冻结DB账本构造配对样本，统计PASS不直接变成可用凭据；核验数据、全部协议、代码依赖、消费和撤销状态。语义构建包含明确入口及其传递依赖和package-lock，文档改动不改哈希。
+- 排空工具只取消没有本token投递预留的PENDING；独占租约阻止并发发送/排空，SENT/UNKNOWN锁不清除，必须提供实际兼容镜像ID，DB不可降级。
+
+## 未完成边界
+
+| 任务    | 当前产物                                                                    | 仍需完成                                                                                |
+| ------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| 2.6     | 风险/准备干运行、冻结卡片模板、版本/代码哈希、validated拒绝启动与legacy兼容 | 新正式publisher配置/运行绑定的完整正向路径及最终冻结；现有validated配置不能据此直接上线 |
+| 5.2–5.4 | 候选登记、追溯检查、离线选择和NO_PROMOTABLE_MODEL工具                       | 真实开发/独立选择数据报告及唯一模型包；不能把空集夹具当成真实选择                       |
+| 6.5–6.6 | 最终run生命周期与一次评价工具                                               | 满足B、2.6和C后登记并实际完成30天+26h独立实验                                           |
+| 7.1–7.3 | 兼容投递锁、回滚预检/排空工具                                               | 匹配PASS后激活新正式publisher、验收和清理旧资格路线                                     |
+
+当前阻塞不是单纯等时间：先解决数据来源时钟与负载证据，再完成最终发布冻结和模型选择，才可开始最终实验。现阶段删除旧正式资格路线或直接打开新发布会让生产失去可用发布路径，因此保留。
+
+## 部署前真实数据证据
+
+2026-09-08 12:49:23 UTC，SEA累计研究响应12047、Info1518；Info无已验证价格来源时间。研究母集按池记录8165行，20个采样名额（不是8165个独立token统计）。正式SENT17、SEND_FAILED50。最近15min请求：200=36、401=4、无HTTP状态=8；稍后仍观察到间歇401与正常200并存。该异常在本批部署前已存在，传输实现强制IPv4；未把它断言为密钥失效，也未修改用户凭据。
+
+当前主市场基准UNAVAILABLE / PRICE_SOURCE_TIME_UNVERIFIED，不能用接收时刻、HTTP Date或代币创建时刻补填。GMGN官方文档的Kline CLI参数为秒，但CLI转换为API毫秒；现有API毫秒坐标保留，未误改单位。参考[GMGN市场文档](https://raw.githubusercontent.com/GMGNAI/gmgn-skills/main/skills/gmgn-market/SKILL.md)。
+
+以下为历史批次记录，数字和“尚未实现”描述仅代表当时状态。
+
+---
+
 # 本轮实施与发布记录（2026-09-07）
 
 当前任务 **18/39 完成，21 项未完成**。这不是整个提案完成或新规则通过验收。下文保留前批记录；本节为最新状态。
@@ -41,15 +80,15 @@ SEA首轮核验发现发现类响应解包不全；已返回本地修复并增�
 
 实施起点：b55f025；旧迁移截至014。新增015研究事实、016投递兼容，原迁移校验和不变。未读取真实config/.env；没有请求GMGN或Telegram。
 
-| 入口 | 现状及实施边界 | 验证依据 |
-|---|---|---|
-| gmgn/client + scheduler | 每次物理attempt持久化审计；成功响应新增允许字段fact，保留排队/请求/返回时间；失败仍走既有attempt审计 | test/gmgn/client、scheduler、governor及research/facts |
-| gmgn/api | 原缓存与WeakMap对象身份保留，复用不额外生成fact | research/facts的gas缓存场景 |
-| discovery/runtime | 公共母集钩子在旧排名、证据、评分及工作队列之前；不把研究对象加入正式处理 | research/storage及既有discovery测试 |
-| safety + quote/gate | 原风险/税/LP/协调退出/成本阈值和Decimal口径不变；10U roundTripLoss仍来自同数量双向准备报价 | test/safety、test/quote；src/gmgn/quote.ts原成本契约 |
-| storage | 015独立表与CAS/不可变触发器；不覆盖旧signals/episodes/cards；共享串行写队列 | research/storage、storage/database及旧版本升级fixtures |
-| outbox | 016为发布兼容基础：独占租约、HTTP前持久化UNKNOWN锁、跨池/跨版本防重复；旧格式解析保留 | research/publication、delivery/outbox |
-| config/index | 缺research节点等于off；observe仅旁路记录；研究配置不改正式revisionId，不误清候选 | config/load及全量回归 |
+| 入口                    | 现状及实施边界                                                                                       | 验证依据                                               |
+| ----------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| gmgn/client + scheduler | 每次物理attempt持久化审计；成功响应新增允许字段fact，保留排队/请求/返回时间；失败仍走既有attempt审计 | test/gmgn/client、scheduler、governor及research/facts  |
+| gmgn/api                | 原缓存与WeakMap对象身份保留，复用不额外生成fact                                                      | research/facts的gas缓存场景                            |
+| discovery/runtime       | 公共母集钩子在旧排名、证据、评分及工作队列之前；不把研究对象加入正式处理                             | research/storage及既有discovery测试                    |
+| safety + quote/gate     | 原风险/税/LP/协调退出/成本阈值和Decimal口径不变；10U roundTripLoss仍来自同数量双向准备报价           | test/safety、test/quote；src/gmgn/quote.ts原成本契约   |
+| storage                 | 015独立表与CAS/不可变触发器；不覆盖旧signals/episodes/cards；共享串行写队列                          | research/storage、storage/database及旧版本升级fixtures |
+| outbox                  | 016为发布兼容基础：独占租约、HTTP前持久化UNKNOWN锁、跨池/跨版本防重复；旧格式解析保留                | research/publication、delivery/outbox                  |
+| config/index            | 缺research节点等于off；observe仅旁路记录；研究配置不改正式revisionId，不误清候选                     | config/load及全量回归                                  |
 
 冻结行为：卡片与发送快照不可变，不恢复消息编辑，不自动交易。安全强化的预期差异：生产publisher不再自动重试UNKNOWN发送；已确认/不确定token跨路线/池的重复准入被锁阻止。lease过期不会解除token锁，只有明确获知未发送（如Telegram返回429）的本次预留可以释放。此项属于提案要求的兼容保护，不改变市场分数或风险阈值。
 

@@ -21,7 +21,8 @@ export async function freezeDataset(
     plan.startAtMs < 0 ||
     plan.frozenAtMs > Date.now() ||
     plan.cutoffAtMs <= plan.startAtMs ||
-    plan.frozenAtMs < plan.cutoffAtMs + measurementProtocol.horizonMs
+    plan.frozenAtMs <
+      plan.cutoffAtMs + measurementProtocol.horizonMs + (plan.use === 'final' ? 7200000 : 0)
   )
     throw new Error('DATASET_WINDOW_OR_MATURITY_INVALID');
   return research.storage.transaction(() => {
@@ -74,11 +75,21 @@ export async function freezeDataset(
             t.chain,
             t.token,
             plan.startAtMs,
-            plan.cutoffAtMs + measurementProtocol.horizonMs
+            Math.min(plan.frozenAtMs, plan.cutoffAtMs + measurementProtocol.horizonMs + 7200000)
           ) as { fact_id: string; semantic_hash: string }[]
     );
+    // Shared safety/gas facts are read-only dependencies; their tokens never enter the sample denominator.
+    const shared = db
+      .prepare(
+        "SELECT fact_id,semantic_hash FROM research_facts WHERE token IS NULL AND endpoint IN ('created_tokens','gas') AND received_at_ms>=? AND received_at_ms<=? ORDER BY received_at_ms,fact_id"
+      )
+      .all(
+        plan.startAtMs,
+        Math.min(plan.frozenAtMs, plan.cutoffAtMs + measurementProtocol.horizonMs + 7200000)
+      ) as { fact_id: string; semantic_hash: string }[];
+    facts.push(...shared);
     const manifest = {
-      version: 1,
+      version: 2,
       plan,
       tokens: selected,
       excluded,

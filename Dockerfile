@@ -23,7 +23,7 @@ RUN groupadd --system signalbot && useradd --system --gid signalbot --home-dir /
   && chmod 700 /home/signalbot/.config/gmgn-signal-bot \
   && chown -R signalbot:signalbot /app /var/lib/gmgn-signal-bot /home/signalbot
 COPY --from=dependencies --chown=signalbot:signalbot /app/node_modules ./node_modules
-COPY --chown=signalbot:signalbot package.json ./
+COPY --chown=signalbot:signalbot package.json package-lock.json ./
 COPY --from=verification --chown=signalbot:signalbot /app/dist ./dist
 COPY --chown=signalbot:signalbot src/storage/migrations ./dist/storage/migrations
 USER signalbot

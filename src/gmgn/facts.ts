@@ -74,6 +74,8 @@ const token = {
   address: true,
   token_address: true,
   biggest_pool_address: true,
+  pool: { address: true, pool_address: true, creator: true },
+  dev: { creator_address: true },
   creation_timestamp: true,
   open_timestamp: true,
   liquidity: true,

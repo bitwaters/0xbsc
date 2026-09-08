@@ -35,6 +35,7 @@ export class ResearchArchive {
         AND NOT EXISTS(SELECT 1 FROM research_fact_references r WHERE r.fact_id=f.fact_id)
         AND NOT EXISTS(SELECT 1 FROM market_opportunities o WHERE o.activation_fact_id=f.fact_id)
         AND NOT EXISTS(SELECT 1 FROM evaluation_baselines b WHERE b.fact_id=f.fact_id)
+        AND NOT EXISTS(SELECT 1 FROM research_capture_ranges c WHERE c.fact_id=f.fact_id)
         AND archive_id IS NULL LIMIT 100)`
         )
         .run(nowMs - 7 * 86400000).changes;

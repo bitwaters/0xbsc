@@ -26,9 +26,9 @@ export class ResearchRecorder {
       join(dirname(storage.db.name), 'research-archives')
     );
   }
-  async start(nowMs: number): Promise<void> {
-    if (this.config.mode === 'observe') {
-      await this.research.startRun(this.config.run_id, this.config, nowMs);
+  async start(nowMs: number, frozenManifest: unknown = this.config): Promise<void> {
+    if (this.config.mode !== 'off') {
+      await this.research.startRun(this.config.run_id, frozenManifest, nowMs);
       const active = await this.research.storage.write(() =>
         this.research.storage.db
           .prepare("SELECT 1 FROM research_runs WHERE run_id=? AND status='ACTIVE'")
@@ -66,7 +66,7 @@ export class ResearchRecorder {
     });
   }
   event(event: NormalizedEvent): void {
-    if (this.config.mode !== 'observe' || this.stoppedReason) return;
+    if (this.config.mode === 'off' || this.stoppedReason) return;
     if (this.events.size >= 2000) {
       this.stop('RESEARCH_UNIVERSE_BACKLOG');
       return;
@@ -94,7 +94,7 @@ export class ResearchRecorder {
     });
   }
   private enqueue(operation: () => Promise<void>): void {
-    if (this.config.mode !== 'observe' || this.stoppedReason) return;
+    if (this.config.mode === 'off' || this.stoppedReason) return;
     if (this.pending >= 200) {
       this.stop('RESEARCH_WRITE_BACKLOG');
       return;

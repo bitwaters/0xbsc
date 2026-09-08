@@ -8,12 +8,24 @@ import { evaluatePaired, selectModel } from './validation.js';
 import { freezeDataset, type DatasetPlan } from './dataset.js';
 import { ResearchStorage } from './storage.js';
 import { Storage } from '../storage/database.js';
-import { deploymentPrecheck } from './precheck.js';
+import { deploymentPrecheck, drainPreparation, type RollbackImage } from './precheck.js';
+import { registerSelection, runSelection } from './selection.js';
+import {
+  registerBudgetEvidence,
+  registerFinal,
+  evaluateFinal,
+  exposeFinal,
+  closeDueFinalRuns,
+  verifyPromotion
+} from './final-run.js';
+import type { FrozenContracts } from './contracts.js';
+import { loadRuntimeConfig } from '../config/load.js';
 import { PUBLICATION_COMPATIBILITY } from '../delivery/publication-guard.js';
 import { hashValue } from './protocol.js';
 import type { MarketFact } from '../gmgn/facts.js';
 import { createHash } from 'node:crypto';
-import { budgetCheck } from './budget-check.js';
+import { budgetCheck, recordedBudgetCheck } from './budget-check.js';
+import { generateCandidates, registerCandidates } from './candidates.js';
 import { measurementReport, measurementReportMarkdown } from './measurement-report.js';
 
 const args = process.argv.slice(2);
@@ -30,6 +42,96 @@ const file = () => {
 };
 const output = (value: unknown) => process.stdout.write(JSON.stringify(value, null, 2) + '\n');
 async function main() {
+  if (
+    [
+      'selection-register',
+      'select-recorded',
+      'final-register',
+      'evaluate-final',
+      'final-expose',
+      'final-close',
+      'budget-register',
+      'drain-preparation'
+    ].includes(args[0] ?? '')
+  ) {
+    const dbPath = option('--db');
+    if (!dbPath) throw new Error('DATABASE_REQUIRED');
+    const storage = await Storage.open(dbPath);
+    try {
+      switch (args[0]) {
+        case 'selection-register': {
+          const data = file() as { candidatePlanId: string; startAtMs: number };
+          const configPath = option('--config');
+          if (!configPath) throw new Error('FROZEN_CONTROL_CONFIG_REQUIRED');
+          const loaded = await loadRuntimeConfig(configPath);
+          output(
+            await registerSelection(storage, data.candidatePlanId, data.startAtMs, loaded.config)
+          );
+          break;
+        }
+        case 'select-recorded': {
+          const configPath = option('--config');
+          if (!configPath) throw new Error('FROZEN_CONTROL_CONFIG_REQUIRED');
+          const data = file() as { registrationId: string; datasetId: string };
+          const loaded = await loadRuntimeConfig(configPath);
+          output(await runSelection(storage, data.registrationId, data.datasetId, loaded.config));
+          break;
+        }
+        case 'final-register':
+          output(await registerFinal(storage, file()));
+          break;
+        case 'evaluate-final': {
+          const data = file() as { runId: string; datasetId: string };
+          output(await evaluateFinal(storage, data.runId, data.datasetId));
+          break;
+        }
+        case 'final-expose': {
+          const data = file() as { runId: string };
+          output(await exposeFinal(storage, data.runId));
+          break;
+        }
+        case 'final-close':
+          output({ closed: await closeDueFinalRuns(storage) });
+          break;
+        case 'budget-register':
+          output(await registerBudgetEvidence(storage, file()));
+          break;
+        case 'drain-preparation':
+          output(await drainPreparation(storage, file() as RollbackImage));
+          break;
+      }
+    } finally {
+      storage.close();
+    }
+    return;
+  }
+  if (args[0] === 'promotion' && args[1] === 'verify') {
+    const path = option('--db');
+    if (!path) throw new Error('DATABASE_REQUIRED');
+    const db = new Database(path, { readonly: true, fileMustExist: true });
+    try {
+      const data = file() as { certificateId: string; contracts: FrozenContracts };
+      const result = verifyPromotion(db, data.certificateId, data.contracts);
+      output(result);
+      if (result.status !== 'VALID') process.exitCode = 1;
+    } finally {
+      db.close();
+    }
+    return;
+  }
+  if (args[0] === 'candidates' && args[1] === 'generate') {
+    const dbPath = option('--db');
+    if (!dbPath) output(generateCandidates(file()));
+    else {
+      const storage = await Storage.open(dbPath);
+      try {
+        output(await registerCandidates(storage, file()));
+      } finally {
+        storage.close();
+      }
+    }
+    return;
+  }
   if (args[0] === 'measurement-report') {
     const report = measurementReport(file());
     if (option('--format') === 'markdown') process.stdout.write(measurementReportMarkdown(report));
@@ -37,7 +139,16 @@ async function main() {
     return;
   }
   if (args[0] === 'budget-check') {
-    output(await budgetCheck());
+    const dbPath = option('--db');
+    if (!dbPath) output(await budgetCheck());
+    else {
+      const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+      try {
+        output(await recordedBudgetCheck(db, Date.now()));
+      } finally {
+        db.close();
+      }
+    }
     return;
   }
   if (args[0] === 'manifest' && args[1] === 'validate') {
@@ -114,12 +225,14 @@ async function main() {
       formalPublisher: 'legacy',
       newPublisherEnabled: false,
       finalRunEligible: false,
-      remainingEngineering: [
-        'paired live collection',
-        'frozen dry-run publisher',
-        'mixed-load certificate',
-        'final-run lifecycle'
-      ]
+      blockingGates: [
+        'verified GMGN price source timestamp',
+        'registered independent selection data',
+        'matching selected model and recorded-load evidence',
+        '30-day final run plus 26-hour maturity',
+        'conditional validated publisher activation'
+      ],
+      toolsDoNotCertifyStrategy: true
     });
     return;
   }

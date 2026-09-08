@@ -4,7 +4,8 @@ import { canonicalJson } from '../discovery/events.js';
 export const hashValue = (value: unknown): string =>
   createHash('sha256').update(canonicalJson(value)).digest('hex');
 export const measurementProtocol = Object.freeze({
-  version: 1,
+  version: 2,
+  quoteSizing: '10U-requested-native-atoms-actual-returned-usd',
   horizonMs: 86400000,
   baselineDeadlineMs: 5000,
   physicalTimeoutMs: 2000,

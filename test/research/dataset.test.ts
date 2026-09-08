@@ -51,7 +51,12 @@ void test('dataset cutoff and token identity are immutable across pools and fina
     );
     await assert.rejects(freezeDataset(r, { ...plan, cutoffAtMs: 99 }), /ALREADY_FROZEN/);
     await assert.rejects(
-      freezeDataset(r, { ...plan, datasetId: 'f', use: 'final' }),
+      freezeDataset(r, {
+        ...plan,
+        datasetId: 'f',
+        use: 'final',
+        frozenAtMs: plan.frozenAtMs + 7200000
+      }),
       /FINAL_RUN_NOT_PREREGISTERED/
     );
     s.db.prepare('UPDATE dataset_memberships SET consumed=1').run();

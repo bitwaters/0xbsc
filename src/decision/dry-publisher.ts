@@ -17,6 +17,8 @@ export interface DecisionContext {
   anchorAtMs: number;
 }
 export interface DryPreparation {
+  qualification?: { atMs: number; factIds: string[] };
+  requestedNotionalUsd?: '10';
   status: 'PASS' | 'FAIL' | 'UNKNOWN';
   riskHash: string;
   checkedAtMs: number;
@@ -26,6 +28,14 @@ export interface DryPreparation {
   sellUsd: string;
   tokenQuantity: string;
   quoteReceivedAtMs: number;
+}
+export class PreparationFailure extends Error {
+  constructor(
+    reason: string,
+    readonly qualification: DryPreparation['qualification'] | null = null
+  ) {
+    super(reason);
+  }
 }
 export function decisionContext(
   state: OpportunityState,
@@ -64,6 +74,7 @@ export async function dryPublish(input: {
     throw new Error('MODEL_OR_STATE_NOT_READY');
   const original = structuredClone(input.state);
   const context = decisionContext(original, input.riskHash);
+  let qualification: DryPreparation['qualification'] | null = null;
   const cancelled = (reason: string) => ({
     status: 'CANCELLED' as const,
     context,
@@ -74,14 +85,20 @@ export async function dryPublish(input: {
       version: original.version + 1
     },
     reason,
+    qualification,
     outbox: null
   });
   let prepared: DryPreparation;
   try {
     prepared = await input.prepare(context);
-  } catch {
+  } catch (error) {
+    if (error instanceof PreparationFailure) {
+      qualification = error.qualification;
+      return cancelled(error.message);
+    }
     return cancelled('MISSING_PREPARATION');
   }
+  qualification = prepared.qualification ?? null;
   const now = input.now();
   if (
     prepared.riskHash !== context.riskHash ||
@@ -113,7 +130,8 @@ export async function dryPublish(input: {
   let cost: Decimal;
   try {
     if (
-      !decimalValue(prepared.buyUsd)?.eq(10) ||
+      !decimalValue(prepared.buyUsd)?.gt(0) ||
+      (prepared.requestedNotionalUsd !== '10' && !decimalValue(prepared.buyUsd)?.eq(10)) ||
       !decimalValue(prepared.tokenQuantity)?.gt(0) ||
       !decimalValue(prepared.sellUsd)?.gte(0)
     )
@@ -136,6 +154,7 @@ export async function dryPublish(input: {
       factId: latest.fact.factId
     },
     preparation: {
+      requestedNotionalUsd: '10',
       buyUsd: prepared.buyUsd,
       tokenQuantity: prepared.tokenQuantity,
       roundTripLoss: cost.toString()
@@ -146,6 +165,7 @@ export async function dryPublish(input: {
   // Canonical serialized snapshot is the immutable review artifact. A caller cannot mutate its price later.
   return {
     status: 'DRY_READY' as const,
+    qualification,
     context,
     state: decision.state,
     reason: 'SIMULATED_ONLY',

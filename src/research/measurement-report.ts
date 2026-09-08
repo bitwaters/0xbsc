@@ -16,7 +16,7 @@ const identity = {
   track,
   protocolHash: z.string().min(1),
   confirmationKind: z.enum(['ACTUAL', 'SIMULATED', 'DECISION']),
-  confirmationAtMs: time,
+  confirmationAtMs: time.nullable(),
   horizonMs: z.number().int().positive().safe()
 };
 const expected = z.object(identity).strict();
@@ -96,7 +96,8 @@ export function measurementReport(value: unknown) {
       if (
         s.availableAtMs === null ||
         (s.track !== 'card_reference_legacy' &&
-          (s.availableAtMs < s.confirmationAtMs ||
+          (s.confirmationAtMs === null ||
+            s.availableAtMs < s.confirmationAtMs ||
             s.availableAtMs >
               s.confirmationAtMs +
                 (s.track === 'decision_market_replay_v1'
@@ -177,7 +178,7 @@ export function measurementReport(value: unknown) {
         group.baselineValid++;
         // The card coordinate precedes confirmation; never report that as post-confirmation wait.
         if (s.track !== 'card_reference_legacy')
-          group.waitsMs.push(observed.availableAtMs! - s.confirmationAtMs);
+          group.waitsMs.push(observed.availableAtMs! - s.confirmationAtMs!);
       }
       groups.set(id, group);
     }

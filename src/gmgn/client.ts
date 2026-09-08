@@ -55,6 +55,7 @@ export interface ApiObservation {
     inFlight: number | null;
     correlationId: string | null;
     purpose?: RequestPurpose;
+    research?: boolean;
     rateLimit: RateLimitInfo | null;
   };
 }
@@ -108,10 +109,7 @@ export class GmgnClient {
       if (
         error instanceof GmgnError &&
         error.kind === 'network' &&
-        !(
-          (context.research || context.purpose === 'shadow_execution') &&
-          apiMetricEndpoint(input.path) === 'quote'
-        )
+        !(context.research || context.purpose === 'shadow_execution')
       )
         return this.attempt<T>(input, 1, false, deadlineMs);
       throw error;
@@ -154,7 +152,8 @@ export class GmgnClient {
         retryEligible,
         undefined,
         context.correlationId,
-        context.purpose
+        context.purpose,
+        research
       );
     const weight = this.options.weights?.[endpoint];
     if (!weight || !Number.isFinite(weight))
@@ -172,7 +171,8 @@ export class GmgnClient {
           retryEligible,
           admission,
           context.correlationId,
-          context.purpose
+          context.purpose,
+          research
         )
     });
   }
@@ -183,7 +183,8 @@ export class GmgnClient {
     retryEligible: boolean,
     admission?: Admission,
     correlationId?: string,
-    purpose: RequestPurpose = 'legacy_formal'
+    purpose: RequestPurpose = 'legacy_formal',
+    research = false
   ): Promise<T> {
     const startedAtMs = this.options.now?.() ?? Date.now();
     const token = typeof input.query?.address === 'string' ? input.query.address.toLowerCase() : '';
@@ -210,6 +211,7 @@ export class GmgnClient {
           inFlight: admission?.inFlight ?? null,
           correlationId: correlationId ?? null,
           purpose,
+          research,
           rateLimit
         },
         ...(detail === undefined ? {} : { detail })

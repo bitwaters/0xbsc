@@ -263,7 +263,7 @@ void test('YAML administrators default to empty and reject invalid configured id
   }
 });
 
-void test('passive research config preserves legacy revision and unsupported execution mode fails closed', async () => {
+void test('passive research config preserves legacy revision and unconfigured execution mode fails closed', async () => {
   const fixture = await configFile();
   try {
     const legacy = await loadRuntimeConfig(fixture.path);
@@ -275,13 +275,16 @@ void test('passive research config preserves legacy revision and unsupported exe
       fixture.path,
       validYaml + '\nresearch: { mode: execute_shadow, run_id: audit-1 }\n'
     );
-    await assert.rejects(loadRuntimeConfig(fixture.path), /research.mode/);
+    await assert.rejects(
+      loadRuntimeConfig(fixture.path),
+      /research: SHADOW_MANIFEST_AND_BUDGET_REQUIRED/
+    );
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
   }
 });
 
-void test('deployment observe override preserves formal revision and rejects active research modes', async () => {
+void test('deployment observe override preserves formal revision and requires manifests for active shadow mode', async () => {
   const fixture = await configFile();
   const previous = process.env.RESEARCH_MODE;
   try {
@@ -292,7 +295,10 @@ void test('deployment observe override preserves formal revision and rejects act
     assert.equal(after.config.research?.mode, 'observe');
     assert.equal(after.revisionId, before.revisionId);
     process.env.RESEARCH_MODE = 'execute_shadow';
-    await assert.rejects(loadRuntimeConfig(fixture.path), /invalid research environment/);
+    await assert.rejects(
+      loadRuntimeConfig(fixture.path),
+      /research: SHADOW_MANIFEST_AND_BUDGET_REQUIRED/
+    );
   } finally {
     if (previous === undefined) delete process.env.RESEARCH_MODE;
     else process.env.RESEARCH_MODE = previous;

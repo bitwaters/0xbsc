@@ -1,8 +1,22 @@
 import { GmgnScheduler, type Clock, type Priority } from '../gmgn/scheduler.js';
 import { hashValue } from './protocol.js';
 import { quantile } from './validation.js';
+import type { SqliteDatabase } from '../storage/database.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+export const researchBudgetContractHash = () => {
+  const ext = fileURLToPath(import.meta.url).endsWith('.ts') ? '.ts' : '.js';
+  return hashValue({
+    version: 2,
+    physicalTimeoutMs: 2000,
+    files: ['../gmgn/scheduler', '../gmgn/context', '../gmgn/errors', './budget'].map((path) => [
+      path,
+      readFileSync(new URL(path + ext, import.meta.url), 'utf8')
+    ])
+  });
+};
 
-interface Arrival {
+export interface Arrival {
   id: string;
   atMs: number;
   weight: number;
@@ -10,6 +24,87 @@ interface Arrival {
   durationMs: number;
   priority: Priority;
   research: boolean;
+}
+
+export async function recordedBudgetCheck(db: SqliteDatabase, nowMs: number, quoteGapMs = 1000) {
+  const rows = db
+    .prepare(
+      `SELECT id,endpoint,started_at_ms,completed_at_ms,metadata_json FROM api_attempts
+    WHERE started_at_ms>=? AND COALESCE(json_extract(metadata_json,'$.research'),0)=0 ORDER BY started_at_ms,id LIMIT 9000`
+    )
+    .all(nowMs - 900000) as {
+    id: string;
+    endpoint: string;
+    started_at_ms: number;
+    completed_at_ms: number;
+    metadata_json: string;
+  }[];
+  if (!rows.length) throw new Error('NO_RECORDED_ARRIVALS');
+  const raw = rows.map((row) => {
+    const meta = JSON.parse(row.metadata_json) as {
+      queuedAtMs: number;
+      weight: number;
+      priority: Priority;
+    };
+    if (
+      !['formal', 'candidate', 'discovery', 'observation', 'evaluation'].includes(meta.priority) ||
+      !Number.isSafeInteger(meta.queuedAtMs)
+    )
+      throw new Error('ARRIVAL_METADATA_UNVERIFIED');
+    return {
+      id: row.id,
+      atMs: meta.queuedAtMs,
+      weight: meta.weight,
+      priority: meta.priority,
+      research: false,
+      channel: row.endpoint === 'quote' ? 'quote' : row.endpoint,
+      durationMs: row.completed_at_ms - row.started_at_ms
+    };
+  });
+  const start = Math.min(...raw.map((r) => r.atMs)),
+    end = Math.max(...raw.map((r) => r.atMs)) - start;
+  const arrivals: Arrival[] = raw.map((r) => ({ ...r, atMs: r.atMs - start }));
+  for (let at = 3000; at < end; at += 30000) {
+    arrivals.push(
+      {
+        id: `research-info-${at}`,
+        atMs: at,
+        weight: 1,
+        channel: 'info',
+        durationMs: 2000,
+        priority: 'evaluation',
+        research: true
+      },
+      {
+        id: `research-holders-${at}`,
+        atMs: at + 2500,
+        weight: 5,
+        channel: 'holders',
+        durationMs: 2000,
+        priority: 'evaluation',
+        research: true
+      },
+      {
+        id: `research-buy-${at}`,
+        atMs: at + 5500,
+        weight: 2,
+        channel: 'quote',
+        durationMs: 2000,
+        priority: 'evaluation',
+        research: true
+      },
+      {
+        id: `research-sell-${at}`,
+        atMs: at + 8000,
+        weight: 2,
+        channel: 'quote',
+        durationMs: 2000,
+        priority: 'evaluation',
+        research: true
+      }
+    );
+  }
+  return budgetCheck(quoteGapMs, arrivals, 'RECORDED');
 }
 class VirtualClock implements Clock {
   time = 0;
@@ -133,9 +228,28 @@ async function simulate(arrivals: Arrival[], enabled: boolean, quoteGapMs: numbe
   return rows.sort((a, b) => a.id.localeCompare(b.id));
 }
 /** Repeatable contention counterexamples on the production scheduler; no GMGN or Telegram access. */
-export async function budgetCheck(quoteGapMs = 1000) {
-  const off = await simulate(defaultArrivals, false, quoteGapMs),
-    on = await simulate(defaultArrivals, true, quoteGapMs);
+export async function budgetCheck(
+  quoteGapMs = 1000,
+  arrivals = defaultArrivals,
+  source: 'SYNTHETIC' | 'RECORDED' = 'SYNTHETIC'
+) {
+  if (
+    !arrivals.length ||
+    arrivals.length > 10000 ||
+    new Set(arrivals.map((a) => a.id)).size !== arrivals.length ||
+    arrivals.some(
+      (a) =>
+        ![a.atMs, a.weight, a.durationMs].every(Number.isFinite) ||
+        a.atMs < 0 ||
+        a.durationMs < 0 ||
+        a.weight <= 0 ||
+        a.weight > 5 ||
+        (a.research && a.durationMs > 2000)
+    )
+  )
+    throw new Error('INVALID_WORKLOAD');
+  const off = await simulate(arrivals, false, quoteGapMs),
+    on = await simulate(arrivals, true, quoteGapMs);
   const formal = on.filter((r) => r.priority === 'formal');
   const increments = formal.map((row) => {
     const control = off.find((r) => r.id === row.id)!;
@@ -157,7 +271,8 @@ export async function budgetCheck(quoteGapMs = 1000) {
   const measured = Number.isFinite(maximum) && dispatched > 0;
   const report = {
     version: 'scheduler-contention-fixture-v1',
-    workloadHash: hashValue(defaultArrivals),
+    runtimeContractHash: researchBudgetContractHash(),
+    workloadHash: hashValue(arrivals),
     quoteGapMs,
     status: measured && maximum <= 3000 ? 'PASS' : 'INCONCLUSIVE',
     maximumAdditionalWaitMs: Number.isFinite(maximum) ? maximum : null,
@@ -165,8 +280,9 @@ export async function budgetCheck(quoteGapMs = 1000) {
     formalOn: percentiles(waits(on)),
     researchDispatched: dispatched,
     researchExcluded: on.filter((r) => r.research && r.status === 'RESOURCE_EXCLUDED').length,
-    productionEnablement: false,
-    scope: 'SYNTHETIC_CONTENTION_ONLY',
+    productionEnablement:
+      source === 'RECORDED' && measured && maximum <= 3000 && quoteGapMs + 2000 <= 3000,
+    scope: source === 'RECORDED' ? 'RECORDED_ARRIVAL_MOCK_TRANSPORT' : 'SYNTHETIC_CONTENTION_ONLY',
     off,
     on
   };
