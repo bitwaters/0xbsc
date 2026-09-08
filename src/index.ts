@@ -1,3 +1,4 @@
+import { startCheckpointWorker } from './storage/checkpoint.js';
 import { BusinessHealth } from './observability/business-health.js';
 import { dirname, join } from 'node:path';
 import { writeFileSync } from 'node:fs';
@@ -56,6 +57,7 @@ const clock: Clock = {
   random: Math.random
 };
 const storage = await Storage.open(loaded.config.storage.sqlite_path);
+const checkpointer = await startCheckpointWorker(storage.db);
 const researchRecorder =
   loaded.config.research && loaded.config.research.mode !== 'off'
     ? new ResearchRecorder(storage, loaded.config.research, (reason) =>
@@ -1087,7 +1089,8 @@ const metricTimer = setInterval(() => {
           event: 'runtime_metrics',
           ...snapshot,
           gmgn: scheduler.snapshot(),
-          business
+          business,
+          checkpoint: checkpointer.snapshot()
         })
       );
     })
@@ -1111,6 +1114,7 @@ const writeHealth = () =>
       atMs: clock.now(),
       revision: loaded.revisionId,
       business: businessHealth.snapshot(),
+      checkpoint: checkpointer.snapshot(),
       gmgn: scheduler.snapshot(),
       research: {
         mode: loaded.config.research?.mode ?? 'off',
@@ -1138,8 +1142,10 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const)
     clearInterval(healthTimer);
     clearInterval(prewatchTimer);
     discovery.stop();
-    storage.close();
-    process.exit(0);
+    void checkpointer.close().finally(() => {
+      storage.close();
+      process.exit(0);
+    });
   });
 
 async function deliverPendingOutbox(): Promise<void> {

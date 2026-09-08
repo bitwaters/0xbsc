@@ -47,3 +47,9 @@ SEA 于 16:08 UTC 仍运行 legacy live + research observe；最后 SENT 为 9 �
 8afd311 部署后发现旧 research-observe-v1 已为 INCONCLUSIVE，研究事实最后写入 16:55 UTC；独立容量测量只有 807,391,232 字节、归档为 0，未达 2 GiB 上限。因此，采集停用后的 CPU 数值不能用来证明批处理在真实采集负载下通过。旧容器日志已随重建移除，无法从旧版泛化状态还原确切停止原因，不作推断。
 
 保留旧批次及事实，Compose 默认新建 research-observe-v2-runtime-fix 被动采集批次，仍保持原 2 GiB 上限和 legacy live。研究停止原因现在写入 operation_traces 的 research_failure 记录，维护错误区分阶段与脱敏 SQLite 错误码，以便跨容器重建诊断；不将已终止批次改回 ACTIVE。最终验收必须在新批次 ACTIVE 且持续写入时进行。
+
+## 自动检查点隔离
+
+研究持续开启时的复验仍见周期性提交延迟，V8 采样热点落在 sqliteTransaction 的原生提交调用。SQLite 默认由触发阈值的提交线程执行自动检查点，官方支持将周期检查点转移到独立线程（[SQLite WAL 性能说明](https://www.sqlite.org/wal.html#performance_considerations)）。因此追加后台 PASSIVE 检查点，并保留 FULL 持久化；主连接只在后台线程就绪后取消自动检查点，后台失败或心跳丢失恢复原自动机制并明确标为故障。健康记录包含检查点耗时、WAL 帧数与未回写积压，积压超过 256 MiB 或后台故障导致健康检查失败。
+
+新增测试验证并发读事务阻挡检查点时不影响已提交内容，读事务释放后积压消退，关闭时恢复自动机制，FULL 同步等级始终不变。SQLite 本地实际版本 3.53.2，已高于官方 WAL-reset 修复版本；没有降低持久化等级或删除 WAL 文件。
