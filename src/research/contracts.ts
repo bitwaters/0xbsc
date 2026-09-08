@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { relative } from 'node:path';
 import { hashValue, protocolHash } from './protocol.js';
@@ -69,6 +69,14 @@ export function semanticBuild() {
     for (const match of text.matchAll(/(?:from\s+|import\s*)['"](\.[^'"]+)\.js['"]/g))
       pending.push(new URL(match[1]! + extension, url));
   }
+  const migrations = new URL('../storage/migrations/', import.meta.url);
+  for (const file of readdirSync(migrations)
+    .filter((name) => name.endsWith('.sql'))
+    .sort())
+    files.push({
+      path: 'storage/migrations/' + file,
+      hash: hashValue(readFileSync(new URL(file, migrations), 'utf8'))
+    });
   files.push({
     path: 'package-lock.json',
     hash: hashValue(readFileSync(new URL('../../package-lock.json', import.meta.url), 'utf8'))
