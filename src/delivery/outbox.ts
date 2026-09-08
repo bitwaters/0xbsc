@@ -14,6 +14,7 @@ export class OutboxDeliveryService {
     private readonly options: {
       storage: Storage;
       publicationGuard?: PublicationGuard;
+      decisionFormat?: 'legacy-v1' | 'opportunity-v1';
       telegram: TelegramClient;
       chatId: string | number;
       render: (signal: PendingOutboxSignal) => DeliveryPayload;
@@ -37,7 +38,8 @@ export class OutboxDeliveryService {
     const now = this.options.now?.() ?? Date.now();
     for (const signal of await this.options.storage.pendingOutboxSignals(
       now,
-      Boolean(this.options.publicationGuard)
+      Boolean(this.options.publicationGuard),
+      this.options.decisionFormat
     ))
       await this.deliver(signal);
   }

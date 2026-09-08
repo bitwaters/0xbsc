@@ -1,3 +1,4 @@
+import { trialReport } from './trial-report.js';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
@@ -129,6 +130,18 @@ async function main() {
       } finally {
         storage.close();
       }
+    }
+    return;
+  }
+  if (args[0] === 'trial-report') {
+    const path = option('--db'),
+      runId = option('--run');
+    if (!path || !runId) throw new Error('DB_AND_RUN_REQUIRED');
+    const db = new Database(path, { readonly: true, fileMustExist: true });
+    try {
+      output(trialReport(db, runId));
+    } finally {
+      db.close();
     }
     return;
   }

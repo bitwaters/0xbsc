@@ -23,6 +23,9 @@ export class ResearchStorage {
     this.quota.reserved += bytes;
     return true;
   }
+  reserveReferenceBytes(count: number, maxBytes: number): boolean {
+    return this.reserveBytes(count * 4096, maxBytes);
+  }
   quotaBytes(): number | null {
     return this.quota?.bytes ?? null;
   }

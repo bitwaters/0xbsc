@@ -152,7 +152,7 @@ export class MeasurementStore {
           .prepare(
             `UPDATE evaluation_baselines SET status=?,reason=?,price=?,available_at_ms=?,fact_id=?,
       details_json=json_set(details_json,'$.sourceAtMs',?) WHERE baseline_id=? AND status='PENDING'
-      AND (?!='VALID' OR track='card_reference_legacy' OR (? IS NOT NULL AND ?>=confirmation_at_ms AND ?<=deadline_at_ms))`
+      AND (?!='VALID' OR track IN ('card_reference_legacy','trial_card_reference_v1') OR (? IS NOT NULL AND ?>=confirmation_at_ms AND ?<=deadline_at_ms))`
           )
           .run(
             value.status,

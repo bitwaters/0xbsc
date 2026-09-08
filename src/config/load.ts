@@ -88,6 +88,13 @@ export const runtimeConfigSchema = z
         z.object({ engine: z.literal('legacy') }).strict(),
         z
           .object({
+            engine: z.literal('trial'),
+            manifest_path: z.string().min(1),
+            model_hash: z.string().regex(/^[a-f0-9]{64}$/)
+          })
+          .strict(),
+        z
+          .object({
             engine: z.literal('validated'),
             model_hash: z.string().regex(/^[a-f0-9]{64}$/),
             certificate_path: z.string().min(1)
@@ -332,6 +339,20 @@ export async function loadRuntimeConfig(path: string): Promise<LoadedConfig> {
     (!parsed.data.research.manifest_path || !parsed.data.research.budget_evidence_path)
   )
     throw new ConfigError('research: SHADOW_MANIFEST_AND_BUDGET_REQUIRED');
+  // Explicit deployment selection; credentials remain in the existing SEA files.
+  const publicationEngine = process.env.PUBLICATION_ENGINE ?? env?.PUBLICATION_ENGINE;
+  if (publicationEngine === 'trial') {
+    const publication = runtimeConfigSchema.shape.publication.parse({
+      engine: 'trial',
+      manifest_path: process.env.PUBLICATION_MANIFEST_PATH ?? env?.PUBLICATION_MANIFEST_PATH,
+      model_hash: process.env.PUBLICATION_MODEL_HASH ?? env?.PUBLICATION_MODEL_HASH
+    });
+    parsed.data.publication = publication;
+  } else if (publicationEngine === 'legacy') {
+    parsed.data.publication = { engine: 'legacy' };
+  } else if (publicationEngine !== undefined) {
+    throw new ConfigError('INVALID_PUBLICATION_ENGINE');
+  }
   if (parsed.data.publication?.engine === 'validated')
     throw new ConfigError(
       'VALIDATED_FORBIDS_LEGACY_MARKET_KEYS: activation requires the stage E configuration and matching promotion evidence'
@@ -361,6 +382,12 @@ const userIds = z
   .pipe(z.array(z.string().regex(/^[1-9]\d*$/)));
 const credentialFileSchema = z
   .object({
+    PUBLICATION_ENGINE: z.enum(['legacy', 'trial']).optional(),
+    PUBLICATION_MANIFEST_PATH: z.string().min(1).optional(),
+    PUBLICATION_MODEL_HASH: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
     RESEARCH_MODE: z.enum(['off', 'observe']).optional(),
     RESEARCH_RUN_ID: z
       .string()

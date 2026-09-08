@@ -1,3 +1,9 @@
+import { TrialRuntime } from './decision/trial-runtime.js';
+import {
+  loadPublicationModel,
+  prepareTrialDelivery,
+  renderTrial
+} from './delivery/trial-publication.js';
 import { startCheckpointWorker } from './storage/checkpoint.js';
 import { BusinessHealth } from './observability/business-health.js';
 import { dirname, join } from 'node:path';
@@ -50,6 +56,8 @@ import { Decimal } from 'decimal.js';
 
 const configPath = process.argv[2] ?? `${process.env.HOME}/.config/gmgn-signal-bot/config.yaml`;
 const loaded = await loadRuntimeConfig(configPath);
+const publicationModel = loadPublicationModel(loaded.config);
+const isTrial = publicationModel !== null;
 const researchModel = loadResearchModel(loaded.config);
 const clock: Clock = {
   now: () => Date.now(),
@@ -120,10 +128,10 @@ const api = new GmgnApi(
     scheduler,
     weights: loaded.config.gmgn.endpoint_weights,
     missingResetDelayMs: (loaded.config.gmgn.rate_limit.missing_reset_delay_seconds ?? 30) * 1000,
-    ...(researchRecorder
+    ...(researchRecorder || isTrial
       ? {
-          onFact: (fact: MarketFact) => researchRecorder.fact(fact),
-          onFactError: () => researchRecorder.stop('FACT_CONTRACT_FAILED')
+          onFact: (fact: MarketFact) => researchRecorder?.fact(fact),
+          onFactError: () => researchRecorder?.stop('FACT_CONTRACT_FAILED')
         }
       : {}),
     onObservation: (observation) => {
@@ -165,6 +173,24 @@ const candidateApi = new ScheduledCandidateGmgnApi(
   clock,
   loaded.config.gmgn.endpoint_weights
 );
+const trialRuntime = isTrial
+  ? new TrialRuntime(storage, loaded.config, loaded.revisionId, api, clock, businessHealth)
+  : null;
+await trialRuntime?.start();
+const trialTimer = trialRuntime
+  ? setInterval(() => {
+      void trialRuntime
+        .tick()
+        .catch(() => console.error(JSON.stringify({ event: 'trial_tick_failed' })));
+    }, 250)
+  : null;
+const trialOutcomeTimer = trialRuntime
+  ? setInterval(() => {
+      void trialRuntime
+        .outcomeTick()
+        .catch(() => console.error(JSON.stringify({ event: 'trial_outcome_failed' })));
+    }, 1000)
+  : null;
 const researchRuntime =
   researchRecorder && ['collect', 'execute_shadow'].includes(researchRecorder.config.mode)
     ? new ResearchRuntime(researchRecorder, loaded.config, api, clock)
@@ -838,23 +864,34 @@ const processCandidate = (
 };
 const telegram = new TelegramClient({ botToken: loaded.config.telegram.bot_token });
 const outboxDelivery = new OutboxDeliveryService({
-  publicationGuard: new PublicationGuard(storage),
+  publicationGuard: new PublicationGuard(
+    storage,
+    () => clock.now(),
+    isTrial ? 'opportunity-v1' : 'legacy-v1'
+  ),
+  decisionFormat: isTrial ? 'opportunity-v1' : 'legacy-v1',
   storage,
   telegram,
   chatId: loaded.config.telegram.chat_ids[0]!,
-  render: renderOutboxSignal,
-  prepareBeforeDelivery: refreshPendingSignalMarket,
+  render: isTrial ? (signal) => renderTrial(signal, loaded.config) : renderOutboxSignal,
+  prepareBeforeDelivery: isTrial
+    ? (signal) =>
+        prepareTrialDelivery(storage, signal, loaded.config, publicationModel.hash, clock.now())
+    : refreshPendingSignalMarket,
   preparationRetryAt: (error, nowMs) =>
     error instanceof GmgnError ? gmgnRetryDeadline(error, nowMs) : null,
   revalidateBeforeUnknownRetry: revalidateUnknownDelivery,
-  outcomeCheckpointsMinutes: loaded.config.evaluation.checkpoints_minutes,
-  narrativeOutcomeCheckpointsMinutes: loaded.config.evaluation.narrative_checkpoints_minutes,
+  outcomeCheckpointsMinutes: isTrial ? [] : loaded.config.evaluation.checkpoints_minutes,
+  narrativeOutcomeCheckpointsMinutes: isTrial
+    ? []
+    : loaded.config.evaluation.narrative_checkpoints_minutes,
   onTrace: async (signal, stage, occurredAtMs) => {
     const correlationId = asRecord(signal.decision).correlationId;
     if (typeof correlationId === 'string')
       await storage.recordOperationTrace({ correlationId, stage, occurredAtMs });
   },
   onConfirmed: (signal, confirmedAtMs) => {
+    if (trialRuntime) return trialRuntime.confirmed(signal, confirmedAtMs);
     void researchRuntime
       ?.confirmed(signal, confirmedAtMs)
       .catch(() => researchRecorder?.stop('ACTUAL_BASELINE_CAPTURE_FAILED'));
@@ -900,12 +937,17 @@ const discovery = new DiscoveryRuntime({
   api,
   scheduler,
   clock,
-  onEvent: processCandidate,
+  onEvent: trialRuntime
+    ? (event) => {
+        trialRuntime.observe(event);
+        return Promise.resolve();
+      }
+    : processCandidate,
   ...(researchRecorder
     ? { onUniverseObserved: (event: NormalizedEvent) => researchRecorder.event(event) }
     : {}),
   onEventObserved: (_event, persisted) => {
-    if (persisted && safety.precheck(_event).allowed) routes.observe(_event);
+    if (!isTrial && persisted && safety.precheck(_event).allowed) routes.observe(_event);
     metrics.increment('discovered');
     if (!persisted) metrics.increment('deduplicated');
   },
@@ -918,7 +960,7 @@ const discovery = new DiscoveryRuntime({
       })
     )
 });
-routes.restore(await storage.activeEvidenceEvents(clock.now()));
+if (!isTrial) routes.restore(await storage.activeEvidenceEvents(clock.now()));
 await discovery.start();
 void deliverPendingOutbox();
 const outboxDeliveryTimer = setInterval(() => {
@@ -945,7 +987,7 @@ const telegramPollTimer = setInterval(() => {
 let dueLoopRunning = false;
 let gmgnBackgroundBackoffUntilMs = 0;
 const dueTimer = setInterval(() => {
-  if (dueLoopRunning) return;
+  if (isTrial || dueLoopRunning) return;
   dueLoopRunning = true;
   const nowMs = clock.now();
   void storage
@@ -1020,7 +1062,8 @@ const dueTimer = setInterval(() => {
 }, 250);
 let prewatchRunning = false;
 const prewatchTimer = setInterval(() => {
-  if (prewatchRunning || dueLoopRunning || clock.now() < scheduler.cooldownUntilMs) return;
+  if (isTrial || prewatchRunning || dueLoopRunning || clock.now() < scheduler.cooldownUntilMs)
+    return;
   prewatchRunning = true;
   void (async () => {
     const now = clock.now();
@@ -1116,12 +1159,13 @@ const writeHealth = () =>
       business: businessHealth.snapshot(),
       checkpoint: checkpointer.snapshot(),
       gmgn: scheduler.snapshot(),
+      publication: trialRuntime?.snapshot() ?? { engine: 'legacy' },
       research: {
         mode: loaded.config.research?.mode ?? 'off',
         runId: loaded.config.research?.run_id ?? null,
         pendingWrites: researchRecorder?.pending ?? 0,
         stoppedReason: researchRecorder?.stoppedReason ?? null,
-        newPublisherEnabled: false,
+        newPublisherEnabled: isTrial,
         marketBaseline: 'UNAVAILABLE'
       }
     })
@@ -1137,12 +1181,17 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const)
     clearInterval(dueTimer);
     clearInterval(telegramPollTimer);
     clearInterval(outboxDeliveryTimer);
+    if (trialTimer) clearInterval(trialTimer);
+    if (trialOutcomeTimer) clearInterval(trialOutcomeTimer);
     clearInterval(outcomeTimer);
     clearInterval(metricTimer);
     clearInterval(healthTimer);
     clearInterval(prewatchTimer);
     discovery.stop();
-    void checkpointer.close().finally(() => {
+    void (async () => {
+      await trialRuntime?.close();
+      await checkpointer.close();
+    })().finally(() => {
       storage.close();
       process.exit(0);
     });

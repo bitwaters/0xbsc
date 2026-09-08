@@ -80,6 +80,8 @@ export interface OperationTrace {
   correlationId: string;
   stage:
     | 'research_failure'
+    | 'trial_funnel'
+    | 'trial_error'
     | 'source_event'
     | 'observation'
     | 'queue'
@@ -135,6 +137,7 @@ export class Storage {
   private constructor(path: string) {
     this.db = new Database(path);
     this.db.pragma('journal_mode = WAL');
+    this.db.pragma('synchronous = FULL');
     this.db.pragma('foreign_keys = ON');
     this.db.pragma('busy_timeout = 5000');
   }
@@ -183,7 +186,7 @@ export class Storage {
   }
 
   transaction<T>(operation: () => T): Promise<T> {
-    return this.write(this.db.transaction(operation));
+    return this.write(() => this.db.transaction(operation).immediate());
   }
 
   recordConfigRevision(id: string, snapshot: unknown, nowMs: number): Promise<void> {
@@ -925,7 +928,8 @@ export class Storage {
 
   pendingOutboxSignals(
     nowMs = Date.now(),
-    protectedPublication = false
+    protectedPublication = false,
+    format: 'legacy-v1' | 'opportunity-v1' = 'legacy-v1'
   ): Promise<PendingOutboxSignal[]> {
     return this.write(
       () =>
@@ -935,12 +939,12 @@ export class Storage {
                   quote_snapshot_json AS quoteSnapshot, decision_json AS decision
            FROM signals
            WHERE delivery_state IN ('PENDING', 'DELIVERY_UNKNOWN')
-             AND decision_format='legacy-v1'
+             AND decision_format=?
              AND (?=0 OR NOT EXISTS(SELECT 1 FROM publication_token_locks l JOIN episodes e ON e.chain=l.chain AND e.token_address=l.token WHERE e.id=signals.episode_id))
              AND (next_delivery_attempt_at_ms IS NULL OR next_delivery_attempt_at_ms <= ?)
            ORDER BY created_at_ms, id`
           )
-          .all(protectedPublication ? 1 : 0, nowMs)
+          .all(format, protectedPublication ? 1 : 0, nowMs)
           .map((row) => {
             const candidate = row as Omit<PendingOutboxSignal, 'quoteSnapshot' | 'decision'> & {
               quoteSnapshot: string;

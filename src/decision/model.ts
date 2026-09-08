@@ -52,6 +52,7 @@ const definition = z
     invalidation: z.unknown(),
     reset: z.unknown(),
     entry: z.unknown(),
+    max_entry_anchor_multiple: z.number().min(1).max(2).optional(),
     max_opportunity_ms: z.number().int().positive().max(86400000)
   })
   .strict();
@@ -67,6 +68,7 @@ export interface ModelManifest {
   reset: Expression;
   entry: Expression;
   max_opportunity_ms: number;
+  max_entry_anchor_multiple?: number | undefined;
 }
 const numericOps = new Set(['add', 'sub', 'mul', 'div']);
 const comparisonOps = new Set(['gt', 'gte', 'lt', 'lte', 'eq']);

@@ -12,7 +12,7 @@ export class ResearchArchive {
   ) {}
   pin(runId: string, factIds: readonly string[], maxBytes: number): Promise<void> {
     return this.research.storage.transaction(() => {
-      if (this.research.estimatedBytes() + factIds.length * 4096 > maxBytes) {
+      if (!this.research.reserveReferenceBytes(factIds.length, maxBytes)) {
         this.research.storage.db
           .prepare("UPDATE research_runs SET status='INCONCLUSIVE' WHERE run_id=?")
           .run(runId);

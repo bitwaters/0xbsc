@@ -190,3 +190,28 @@ void test('dry publisher freezes entry context and preparation failure cannot cr
   assert.equal(failed.context.opportunityId, state.opportunityId);
   assert.equal(failed.state.anchorPrice, state.anchorPrice);
 });
+
+void test('a refreshed READY price cannot move the original entry anchor', () => {
+  const model = validateModel({ ...definition, max_entry_anchor_multiple: 1.08 });
+  const first = fact('1.3', 1000);
+  const state = evaluateOpportunity(
+    watchingState(token, pool, model.hash),
+    { model: model.manifest, token, poolRevision: pool, facts: [first], evaluationAtMs: 1000 },
+    model.hash
+  ).state;
+  assert.equal(state.status, 'READY');
+  const next = evaluateOpportunity(
+    state,
+    {
+      model: model.manifest,
+      token,
+      poolRevision: pool,
+      facts: [first, fact('1.5', 2000)],
+      evaluationAtMs: 2000
+    },
+    model.hash
+  );
+  assert.equal(next.reason, 'ANCHOR_ENTRY_EXCEEDED');
+  assert.equal(next.state.status, 'INVALIDATED');
+  assert.equal(next.state.anchorPrice, '1.3');
+});

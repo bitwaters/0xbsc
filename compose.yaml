@@ -6,9 +6,12 @@ services:
     restart: unless-stopped
     read_only: true
     environment:
-      # Passive recording reuses existing responses. It creates no additional API calls.
-      RESEARCH_MODE: ${RESEARCH_MODE:-observe}
-      RESEARCH_RUN_ID: ${RESEARCH_RUN_ID:-research-observe-v2-runtime-fix}
+      # User-approved formal trial. The runtime itself persists its selected facts and results.
+      PUBLICATION_ENGINE: ${PUBLICATION_ENGINE:-trial}
+      PUBLICATION_MANIFEST_PATH: /app/models/flow-momentum-trial-v1.json
+      PUBLICATION_MODEL_HASH: b45519a8de78182301264c117e1ce6db92131eba166d3b5300ccab9bd12bb3eb
+      RESEARCH_MODE: ${RESEARCH_MODE:-off}
+      RESEARCH_RUN_ID: ${RESEARCH_RUN_ID:-research-observe-v3}
     volumes:
       - type: bind
         source: ./config.yaml

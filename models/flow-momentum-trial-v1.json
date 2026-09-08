@@ -1,0 +1,405 @@
+{
+  "version": 1,
+  "id": "flow_momentum_trial_v1",
+  "fields": {
+    "price": {
+      "source": "info.price.price",
+      "ttl_ms": 15000,
+      "require_source_time": false
+    },
+    "liquidity": {
+      "source": "info.liquidity",
+      "ttl_ms": 15000,
+      "require_source_time": false
+    },
+    "buy": {
+      "source": "info.price.buy_volume_1m",
+      "ttl_ms": 15000,
+      "require_source_time": false
+    },
+    "sell": {
+      "source": "info.price.sell_volume_1m",
+      "ttl_ms": 15000,
+      "require_source_time": false
+    },
+    "volume": {
+      "source": "info.price.volume_1m",
+      "ttl_ms": 15000,
+      "require_source_time": false
+    },
+    "volume5": {
+      "source": "info.price.volume_5m",
+      "ttl_ms": 15000,
+      "require_source_time": false
+    },
+    "swaps": {
+      "source": "info.price.swaps_1m",
+      "ttl_ms": 15000,
+      "require_source_time": false
+    }
+  },
+  "parameters": {
+    "min_liquidity": 30000,
+    "min_volume": 2000,
+    "min_swaps": 20,
+    "min_buy_share": 0.6,
+    "min_acceleration": 1.1,
+    "max_extension": 1.25
+  },
+  "price_field": "price",
+  "activation": {
+    "op": "and",
+    "args": [
+      {
+        "op": "gte",
+        "args": [
+          {
+            "field": "liquidity"
+          },
+          {
+            "parameter": "min_liquidity"
+          }
+        ]
+      },
+      {
+        "op": "gte",
+        "args": [
+          {
+            "field": "volume"
+          },
+          {
+            "parameter": "min_volume"
+          }
+        ]
+      },
+      {
+        "op": "gte",
+        "args": [
+          {
+            "field": "swaps"
+          },
+          {
+            "parameter": "min_swaps"
+          }
+        ]
+      },
+      {
+        "op": "gte",
+        "args": [
+          {
+            "op": "div",
+            "args": [
+              {
+                "field": "buy"
+              },
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "field": "buy"
+                  },
+                  {
+                    "field": "sell"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "parameter": "min_buy_share"
+          }
+        ]
+      },
+      {
+        "op": "gte",
+        "args": [
+          {
+            "op": "div",
+            "args": [
+              {
+                "op": "mul",
+                "args": [
+                  {
+                    "field": "volume"
+                  },
+                  {
+                    "constant": 5
+                  }
+                ]
+              },
+              {
+                "field": "volume5"
+              }
+            ]
+          },
+          {
+            "parameter": "min_acceleration"
+          }
+        ]
+      }
+    ]
+  },
+  "confirmation": {
+    "op": "gte",
+    "args": [
+      {
+        "field": "price"
+      },
+      {
+        "window": {
+          "field": "price",
+          "ms": 30000,
+          "aggregate": "mean",
+          "min_samples": 2
+        }
+      }
+    ]
+  },
+  "invalidation": {
+    "op": "lt",
+    "args": [
+      {
+        "op": "div",
+        "args": [
+          {
+            "field": "buy"
+          },
+          {
+            "op": "add",
+            "args": [
+              {
+                "field": "buy"
+              },
+              {
+                "field": "sell"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "constant": 0.5
+      }
+    ]
+  },
+  "reset": {
+    "op": "not",
+    "args": [
+      {
+        "op": "and",
+        "args": [
+          {
+            "op": "gte",
+            "args": [
+              {
+                "field": "liquidity"
+              },
+              {
+                "parameter": "min_liquidity"
+              }
+            ]
+          },
+          {
+            "op": "gte",
+            "args": [
+              {
+                "field": "volume"
+              },
+              {
+                "parameter": "min_volume"
+              }
+            ]
+          },
+          {
+            "op": "gte",
+            "args": [
+              {
+                "field": "swaps"
+              },
+              {
+                "parameter": "min_swaps"
+              }
+            ]
+          },
+          {
+            "op": "gte",
+            "args": [
+              {
+                "op": "div",
+                "args": [
+                  {
+                    "field": "buy"
+                  },
+                  {
+                    "op": "add",
+                    "args": [
+                      {
+                        "field": "buy"
+                      },
+                      {
+                        "field": "sell"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "parameter": "min_buy_share"
+              }
+            ]
+          },
+          {
+            "op": "gte",
+            "args": [
+              {
+                "op": "div",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "field": "volume"
+                      },
+                      {
+                        "constant": 5
+                      }
+                    ]
+                  },
+                  {
+                    "field": "volume5"
+                  }
+                ]
+              },
+              {
+                "parameter": "min_acceleration"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "entry": {
+    "op": "and",
+    "args": [
+      {
+        "op": "and",
+        "args": [
+          {
+            "op": "gte",
+            "args": [
+              {
+                "field": "liquidity"
+              },
+              {
+                "parameter": "min_liquidity"
+              }
+            ]
+          },
+          {
+            "op": "gte",
+            "args": [
+              {
+                "field": "volume"
+              },
+              {
+                "parameter": "min_volume"
+              }
+            ]
+          },
+          {
+            "op": "gte",
+            "args": [
+              {
+                "field": "swaps"
+              },
+              {
+                "parameter": "min_swaps"
+              }
+            ]
+          },
+          {
+            "op": "gte",
+            "args": [
+              {
+                "op": "div",
+                "args": [
+                  {
+                    "field": "buy"
+                  },
+                  {
+                    "op": "add",
+                    "args": [
+                      {
+                        "field": "buy"
+                      },
+                      {
+                        "field": "sell"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "parameter": "min_buy_share"
+              }
+            ]
+          },
+          {
+            "op": "gte",
+            "args": [
+              {
+                "op": "div",
+                "args": [
+                  {
+                    "op": "mul",
+                    "args": [
+                      {
+                        "field": "volume"
+                      },
+                      {
+                        "constant": 5
+                      }
+                    ]
+                  },
+                  {
+                    "field": "volume5"
+                  }
+                ]
+              },
+              {
+                "parameter": "min_acceleration"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "op": "lte",
+        "args": [
+          {
+            "field": "price"
+          },
+          {
+            "op": "mul",
+            "args": [
+              {
+                "window": {
+                  "field": "price",
+                  "ms": 60000,
+                  "aggregate": "min",
+                  "min_samples": 2
+                }
+              },
+              {
+                "parameter": "max_extension"
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "max_opportunity_ms": 90000,
+  "max_entry_anchor_multiple": 1.08
+}

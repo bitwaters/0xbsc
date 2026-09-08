@@ -5,6 +5,7 @@ export type RouteName = 'new_launch' | 'revival' | 'continuation';
 export interface RuntimeConfig {
   publication?:
     | { engine: 'legacy' }
+    | { engine: 'trial'; manifest_path: string; model_hash: string }
     | { engine: 'validated'; model_hash: string; certificate_path: string }
     | undefined;
   research?:

@@ -1,3 +1,5 @@
+> 2026-09-08 范围修订：用户明确允许新规则正式试运行，效果继续验证。本轮实施与部署以 [trial-cutover.md](trial-cutover.md) 为准；下方原独立验证任务保留记录，不冒充已完成，也不再作为本轮 trial 切换前置条件。
+
 ## 1. 阶段 A：事实契约与兼容底座
 
 依赖：无。对应 auditable-market-facts、versioned-opportunity-engine。进度随实施更新；勾选表示产物和验证均完成，不能仅凭提案文本勾选。

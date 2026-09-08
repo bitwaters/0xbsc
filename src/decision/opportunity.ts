@@ -152,6 +152,12 @@ export function evaluateOpportunity(
     state.lastActivation = true;
     state.resetArmed = false;
   }
+  if (
+    input.model.max_entry_anchor_multiple !== undefined &&
+    state.anchorPrice !== null &&
+    latest.value.div(state.anchorPrice).gt(input.model.max_entry_anchor_multiple)
+  )
+    return result({ ...state, status: 'INVALIDATED', resetArmed: false }, 'ANCHOR_ENTRY_EXCEEDED');
   if (predicates.invalidation === 'PASS' || predicates.entry === 'FAIL')
     return result({ ...state, status: 'INVALIDATED', resetArmed: false }, 'MARKET_INVALIDATED');
   if (predicates.confirmation === 'PASS')

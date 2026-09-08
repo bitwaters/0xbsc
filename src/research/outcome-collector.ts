@@ -61,7 +61,14 @@ export class OutcomeCollector {
         )
         .get(baselineId)
     )) as { available_at_ms: number; track: string; last: number | null } | undefined;
-    if (!row || !['post_confirmation_market_v1', 'decision_market_replay_v1'].includes(row.track))
+    if (
+      !row ||
+      ![
+        'post_confirmation_market_v1',
+        'decision_market_replay_v1',
+        'trial_card_reference_v1'
+      ].includes(row.track)
+    )
       return;
     const next = observationCoordinates(row.available_at_ms).find(
       (at) => at > (row.last ?? row.available_at_ms)
