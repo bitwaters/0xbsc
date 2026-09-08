@@ -18,6 +18,7 @@ export function measureResearchInBackground(
     const worker = new Worker(
       `
       const { parentPort, workerData: d } = require('node:worker_threads');
+      let stage = 'LOAD';
       (async () => {
         const load = d.typescript
           ? (url) => import('tsx/esm/api').then(m => m.tsImport(url, d.modules.storage))
@@ -25,14 +26,20 @@ export function measureResearchInBackground(
         const { Storage } = await load(d.modules.storage);
         const { ResearchStorage } = await load(d.modules.research);
         const { ResearchArchive } = await load(d.modules.archive);
+        stage = 'OPEN';
         const storage = await Storage.open(d.path);
         try {
           const research = new ResearchStorage(storage);
+          stage = 'ARCHIVE';
           if (d.maintain) await new ResearchArchive(research, d.directory).maintain(Date.now(), d.maxBytes);
+          stage = 'MEASURE';
           const bytes = research.estimatedBytes();
           parentPort.postMessage({ bytes });
         } finally { storage.close(); }
-      })().catch(() => { parentPort.postMessage({ error: 'RESEARCH_MAINTENANCE_FAILED' }); });
+      })().catch(error => {
+        const code = typeof error?.code === 'string' && /^SQLITE_[A-Z_]+$/.test(error.code) ? error.code : 'FAILED';
+        parentPort.postMessage({ error: 'RESEARCH_MAINTENANCE_' + stage + '_' + code });
+      });
     `,
       {
         eval: true,

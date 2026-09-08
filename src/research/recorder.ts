@@ -5,6 +5,7 @@ import { ResearchStorage } from './storage.js';
 import type { Storage } from '../storage/database.js';
 import { dirname, join } from 'node:path';
 import { ResearchArchive } from './archive.js';
+import { randomUUID } from 'node:crypto';
 import { setImmediate as yieldToIO } from 'node:timers/promises';
 import { measureResearchInBackground } from './maintenance.js';
 
@@ -125,7 +126,22 @@ export class ResearchRecorder {
     this.pending++;
     void yieldToIO()
       .then(() => (this.closed ? undefined : operation()))
-      .catch(() => this.stop('RESEARCH_WRITE_FAILED'))
+      .catch((error: unknown) => {
+        const code =
+          error instanceof Error &&
+          'code' in error &&
+          typeof error.code === 'string' &&
+          /^SQLITE_[A-Z_]+$/.test(error.code)
+            ? error.code
+            : null;
+        this.stop(
+          error instanceof Error && /^RESEARCH_MAINTENANCE_[A-Z_]+$/.test(error.message)
+            ? error.message
+            : code
+              ? `RESEARCH_WRITE_FAILED_${code}`
+              : 'RESEARCH_WRITE_FAILED'
+        );
+      })
       .finally(() => {
         this.pending--;
       });
@@ -136,6 +152,14 @@ export class ResearchRecorder {
     this.events.clear();
     this.close();
     this.onError(reason);
+    void this.research.storage
+      .recordOperationTrace({
+        correlationId: randomUUID(),
+        stage: 'research_failure',
+        occurredAtMs: Date.now(),
+        metadata: { runId: this.config.run_id, reason }
+      })
+      .catch(() => undefined);
     void this.research.storage
       .write(() => {
         this.research.storage.db

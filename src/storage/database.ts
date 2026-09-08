@@ -79,6 +79,7 @@ export interface DueOutcomeTask {
 export interface OperationTrace {
   correlationId: string;
   stage:
+    | 'research_failure'
     | 'source_event'
     | 'observation'
     | 'queue'

@@ -193,3 +193,41 @@ void test('research batching is bounded and rolls back on failure without commit
     storage.close();
   }
 });
+
+void test('research failure survives container logs and a new run preserves the terminated run', async () => {
+  const storage = await Storage.open(':memory:');
+  const old = new ResearchRecorder(
+    storage,
+    { mode: 'observe', run_id: 'old', max_storage_bytes: 2 ** 30 },
+    () => undefined
+  );
+  const fresh = new ResearchRecorder(
+    storage,
+    { mode: 'observe', run_id: 'new', max_storage_bytes: 2 ** 30 },
+    () => undefined
+  );
+  try {
+    await old.start(1);
+    old.stop('RESEARCH_WRITE_FAILED_SQLITE_BUSY');
+    await storage.write(() => undefined);
+    const trace = storage.db
+      .prepare("SELECT metadata_json FROM operation_traces WHERE stage='research_failure'")
+      .get() as { metadata_json: string };
+    assert.deepEqual(JSON.parse(trace.metadata_json), {
+      runId: 'old',
+      reason: 'RESEARCH_WRITE_FAILED_SQLITE_BUSY'
+    });
+    await fresh.start(2);
+    assert.deepEqual(
+      storage.db.prepare('SELECT run_id,status FROM research_runs ORDER BY run_id').all(),
+      [
+        { run_id: 'new', status: 'ACTIVE' },
+        { run_id: 'old', status: 'INCONCLUSIVE' }
+      ]
+    );
+  } finally {
+    old.close();
+    fresh.close();
+    storage.close();
+  }
+});

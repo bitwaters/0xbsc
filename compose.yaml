@@ -8,7 +8,7 @@ services:
     environment:
       # Passive recording reuses existing responses. It creates no additional API calls.
       RESEARCH_MODE: ${RESEARCH_MODE:-observe}
-      RESEARCH_RUN_ID: ${RESEARCH_RUN_ID:-research-observe-v1}
+      RESEARCH_RUN_ID: ${RESEARCH_RUN_ID:-research-observe-v2-runtime-fix}
     volumes:
       - type: bind
         source: ./config.yaml
