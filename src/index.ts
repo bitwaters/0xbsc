@@ -937,10 +937,12 @@ const discovery = new DiscoveryRuntime({
   api,
   scheduler,
   clock,
-  onEvent: trialRuntime ? () => Promise.resolve() : processCandidate,
+  universeOnly: isTrial,
+  ...(!isTrial ? { onEvent: processCandidate } : {}),
   ...(researchRecorder || trialRuntime
     ? {
         onUniverseObserved: (event: NormalizedEvent) => {
+          if (isTrial) metrics.increment('discovered');
           researchRecorder?.event(event);
           trialRuntime?.observe(event);
         }

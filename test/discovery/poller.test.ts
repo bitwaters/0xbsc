@@ -480,3 +480,47 @@ void test('public universe includes candidates excluded by legacy ranking and sn
     storage.close();
   }
 });
+
+void test('replacement discovery delivers public candidates without writing or scheduling legacy events', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { parse } = await import('yaml');
+  const { runtimeConfigSchema } = await import('../../src/config/load.js');
+  const config = runtimeConfigSchema.parse(parse(readFileSync('config.example.yaml', 'utf8')));
+  const storage = await Storage.open(':memory:'),
+    clock = new TestClock();
+  const universe: string[] = [];
+  let legacyObserved = 0,
+    legacyProcessed = 0;
+  const runtime = new DiscoveryRuntime({
+    config,
+    storage,
+    clock,
+    scheduler: new GmgnScheduler(clock),
+    universeOnly: true,
+    api: {
+      rank: () => Promise.resolve({ data: { rank: [{ address: '0x' + 'a'.repeat(40), rank: 1 }] } })
+    } as never,
+    onUniverseObserved: (event) => universe.push(event.tokenAddress),
+    onEventObserved: () => {
+      legacyObserved++;
+    },
+    onEvent: () => {
+      legacyProcessed++;
+      return Promise.resolve();
+    }
+  });
+  try {
+    await runtime.tick('trending:1m');
+    clock.value += config.polling.trending_seconds * 1000;
+    await runtime.tick('trending:1m');
+    assert.equal(universe.length, 2);
+    assert.equal(legacyObserved, 0);
+    assert.equal(legacyProcessed, 0);
+    assert.equal(
+      (storage.db.prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n,
+      0
+    );
+  } finally {
+    storage.close();
+  }
+});

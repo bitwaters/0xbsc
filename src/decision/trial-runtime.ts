@@ -33,11 +33,12 @@ interface Watch {
   firstAtMs: number;
   seenAtMs: number;
   dueAtMs: number;
+  activated: boolean;
   facts: MarketFact[];
   trader?: MarketFact;
   pool?: string;
 }
-/** One formal market engine, with fixed fair polling and a bounded candidate set. */
+/** One formal market engine; activated candidates receive timely confirmation before exploration. */
 export class TrialRuntime {
   readonly model;
   readonly research;
@@ -192,6 +193,7 @@ export class TrialRuntime {
       firstAtMs: now,
       seenAtMs: now,
       dueAtMs: now,
+      activated: false,
       facts: []
     });
     this.recordUniverse(event, 'WATCHED');
@@ -241,6 +243,7 @@ export class TrialRuntime {
       runId: this.runId,
       validation: 'UNVALIDATED',
       watching: this.watches.size,
+      activatedWatching: [...this.watches.values()].filter((w) => w.activated).length,
       pendingUniverseWrites: this.universePending.length,
       running: this.running,
       lastTickAtMs: this.lastTickAtMs,
@@ -302,7 +305,12 @@ export class TrialRuntime {
           this.watches.delete(key);
       const watch = [...this.watches.values()]
         .filter((w) => w.dueAtMs <= this.clock.now())
-        .sort((a, b) => a.dueAtMs - b.dueAtMs || a.token.localeCompare(b.token))[0];
+        .sort(
+          (a, b) =>
+            Number(b.activated) - Number(a.activated) ||
+            a.dueAtMs - b.dueAtMs ||
+            a.token.localeCompare(b.token)
+        )[0];
       if (!watch) return;
       watch.dueAtMs = this.clock.now() + 10000;
       if (
@@ -371,6 +379,7 @@ export class TrialRuntime {
             },
             this.model.hash
           );
+          watch.activated = decision.stageResults.activation === 'PASS';
           this.count(decision.reason);
           for (const [stage, result] of Object.entries(decision.stageResults))
             this.count(`${stage}_${result}`);

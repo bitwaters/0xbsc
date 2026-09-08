@@ -32,6 +32,8 @@ export class DiscoveryRuntime {
       api: GmgnApi;
       scheduler: GmgnScheduler;
       clock: Clock;
+      /** The replacement publisher owns candidate persistence and consumes the public universe. */
+      universeOnly?: boolean;
       onEvent?: (event: NormalizedEvent) => Promise<void>;
       onEventObserved?: (event: NormalizedEvent, persisted: boolean) => void;
       onUniverseObserved?: (event: NormalizedEvent) => void;
@@ -85,6 +87,9 @@ export class DiscoveryRuntime {
         this.input.onUniverseObserved(event);
       }
     }
+    // Do not run the retired funnel's per-event FULL commits in replacement mode.
+    // TrialRuntime persists bounded universe audit batches and the actual evaluation facts.
+    if (this.input.universeOnly) return 0;
     const events = adaptGmgnResponse({
       source,
       pollKey: name,

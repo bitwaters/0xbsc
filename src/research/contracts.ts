@@ -22,6 +22,7 @@ const dependencies = [
   '../gmgn/limits',
   '../config/load',
   '../discovery/adapters',
+  '../discovery/runtime',
   '../discovery/events',
   '../gmgn/client',
   '../gmgn/context',

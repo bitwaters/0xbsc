@@ -137,6 +137,30 @@ async function fixture(change: { unsafe?: boolean; falling?: boolean } = {}) {
     quotes: () => quoteCount
   };
 }
+void test('activated candidate completes confirmation ahead of the untouched discovery backlog', async () => {
+  const f = await fixture();
+  try {
+    await f.runtime.tick();
+    assert.equal(f.runtime.snapshot().activatedWatching, 1);
+    for (let i = 1; i < 50; i++) {
+      f.runtime.observe({
+        tokenAddress: '0x' + i.toString(16).padStart(40, '0'),
+        decisionEligible: true
+      } as NormalizedEvent);
+    }
+    for (let i = 0; i < 2; i++) {
+      f.advance();
+      await f.runtime.tick();
+    }
+    const pending = await f.storage.pendingOutboxSignals(f.now(), true, 'opportunity-v1');
+    assert.equal(pending.length, 1, JSON.stringify(f.runtime.snapshot()));
+    assert.equal(f.runtime.snapshot().counts.MARKET_READY_RESEARCH_ONLY, 2);
+  } finally {
+    await f.runtime.close();
+    f.storage.close();
+  }
+});
+
 void test('trial runs actual fact adapter to safety, immutable new-format outbox, mock send and separate baselines', async () => {
   const f = await fixture();
   try {
