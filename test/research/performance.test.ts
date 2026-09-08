@@ -116,3 +116,25 @@ void test('large research database does not cause per-event scans or starve I/O'
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+void test('audit retention uses bounded time and recovery indexes even with no expired data', async () => {
+  const storage = await Storage.open(':memory:');
+  try {
+    const plan = storage.db
+      .prepare(
+        `EXPLAIN QUERY PLAN SELECT e.id FROM events e
+      WHERE e.observed_at_ms<? AND e.expires_at_ms<?
+      AND NOT EXISTS(SELECT 1 FROM episodes ep WHERE ep.chain=e.chain AND ep.token_address=e.token_address)
+      AND EXISTS(SELECT 1 FROM events newer WHERE newer.chain=e.chain AND newer.token_address=e.token_address AND newer.source=e.source AND newer.poll_key IS e.poll_key AND newer.id>e.id) LIMIT ?`
+      )
+      .all(1000, 2000, 500) as { detail: string }[];
+    const details = plan.map((row) => row.detail).join('\n');
+    assert.match(details, /events_retention_time/);
+    assert.match(details, /events_retention_recovery/);
+    assert.match(details, /episodes_retention_token/);
+    assert.doesNotMatch(details, /SCAN e\b|AUTOMATIC/);
+    assert.deepEqual(await storage.retainAudit(2000, 7), { events: 0, traces: 0 });
+  } finally {
+    storage.close();
+  }
+});

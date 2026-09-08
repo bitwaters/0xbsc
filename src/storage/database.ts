@@ -1901,7 +1901,7 @@ export class Storage {
         .prepare(
           `DELETE FROM events WHERE id IN (SELECT e.id FROM events e
         WHERE e.observed_at_ms<? AND e.expires_at_ms<? AND NOT EXISTS(SELECT 1 FROM episodes ep WHERE ep.chain=e.chain AND ep.token_address=e.token_address)
-        AND EXISTS(SELECT 1 FROM events newer WHERE newer.token_address=e.token_address AND newer.source=e.source AND newer.poll_key IS e.poll_key AND newer.id>e.id) LIMIT ?)`
+        AND EXISTS(SELECT 1 FROM events newer WHERE newer.chain=e.chain AND newer.token_address=e.token_address AND newer.source=e.source AND newer.poll_key IS e.poll_key AND newer.id>e.id) LIMIT ?)`
         )
         .run(cutoff, nowMs, batch).changes;
       const traces = this.db
