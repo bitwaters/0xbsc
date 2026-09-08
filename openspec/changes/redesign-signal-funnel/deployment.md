@@ -1,3 +1,35 @@
+# 2026-09-08 本批实际部署（最新记录）
+
+- 应用代码：`3f69249f8f4bfcf56c33bd20f295b549d1d8f425`；主体实现`89ff01b`，随后review补齐迁移SQL的语义哈希。GitHub：`bitwaters/0xbsc` main。
+- 严格按本地修改/检查→GitHub→SEA `/www/wwwroot/0xbsc` git pull→Docker Compose构建/启动；服务器源码没有手工修改。
+- Node24完整CI：334/334测试通过，TypeScript/lint/build通过；Docker verification阶段执行同样检查并成功。OpenSpec strict及git diff --check通过。发布文件扫描238项，无本机现有凭据/私钥匹配；`.env`、`config.yaml`、本地artifacts/scripts/DB未提交。
+- 容器：`3fe5420beefa`，启动`2026-09-08T11:57:39.799588933Z`，healthy。
+- 实际运行image ID：`sha256:661ee3ee2e870b0317f67504165ece671266ebcd56a50a25d8feaf8777879278`；保留标签`bsc-meme-signal-bot:research-compat-3f69249`。Compose manifest digest与image ID不是同一个值，以上采用docker inspect容器的.Image。
+- 兼容回滚image ID：`sha256:1e13eeecd47ddd00cb20592f37c37ce998f0ea98ddd4da7f9d605e337180ed6c`；保留标签`bsc-meme-signal-bot:pre-89ff01b`，实际标签`global-token-lock-v1`已核验。
+- 在线备份受持续写入影响进度缓慢，构建完成后停服务做一致性冷备。备份：`/var/lib/gmgn-signal-bot/backups/pre-3f69249-cold.sqlite`，6,337,544,192字节，0600。仅删除本次未完成在线备份；更早备份保留。没有导入/恢复本机DB。
+- 新增018的4张表均存在：research_baseline_attempts/capture_ranges/registrations/quote_exits。投递记录SENT17、SEND_FAILED50，SENT token锁17；原确认记录与卡片未改写，无测试Telegram消息。
+- 正式配置revision仍为`156c13855e51b058cfd01474419c25e6a216aafb845eb35b0740cfb725c95103`。运行`live + observe`；legacy正式publisher；newPublisherEnabled=false。研究pendingWrites=0、stoppedReason=null、researchInFlight=0，事实持续更新。
+
+## 健康实录与负载证据
+
+健康实录准确revision：`156c13855e51b058cfd01474419c25e6a216aafb845eb35b0740cfb725c95103`。2026-09-08 12:02:57 UTC检查，队列6/在途1，研究无在途；部署以来成功200=15、401=1、网络retry=1、429=0。容器healthy不等于所有GMGN请求成功；间歇401在部署前已存在，当前仍未根治，不能宣称数据源已完全恢复。
+
+真实15min请求到达流使用当前生产scheduler做开/关研究mock传输对照（不额外请求GMGN）：
+
+- 结果INCONCLUSIVE，productionEnablement=false。
+- 正式off/on的P50/P95/P99和最大新增等待均null，因为该窗口没有可用正式请求比较。不能用空分母填0或宣称延迟通过。
+- 116个模拟研究任务发出、0个模拟排除；这是调度模拟计数，不是真实API流量。
+- evidenceHash：`0de47c31a07df2ed37f75f5e03305d6ef789406085ab9376cd647221a0bf0668`。
+- budget runtimeContractHash：`2b006dffe88a0a16d5a452479666bc7db5febf383667375a2c3cdb3c9f9ad588`。
+- 完整运行证据保存在SEA数据卷`/var/lib/gmgn-signal-bot/research-evidence/budget-3f69249.json`，0600；未上传原始运行数据到GitHub。
+- 应用语义codeContractHash：`c147186dd80244e8f404a1d4322509d567acb822fe5eaeae2cb9bda9b2a0b4c5`，包含迁移SQL及package-lock。文档后续提交不改变这个应用构建。
+
+当前仍未获准启用execute_shadow或新正式筛选：价格来源时间未验证、预算比较不足、阶段C独立选择与D最终实验未执行，并且任务2.6的新正式绑定/最终冻结尚未完成。任务进度30/39，不将这次框架部署称为新策略完整上线。
+
+命令和后续条件见[operations.md](operations.md)。以下保留历史部署记录。
+
+---
+
 # SEA 部署验收（2026-09-07 UTC）
 
 ## 最新追加部署

@@ -4,6 +4,8 @@
 
 本批新增完成：2.5、2.7、3.1、3.2、3.4、3.5、4.2–4.5、6.1、6.4。4.5的勾选表示负载测量工具和拒绝不充分证据的门禁完成，不代表线上研究已经获准启用。部署实测另见deployment.md。
 
+本批最终验证：Node24 CI 334/334测试通过，Docker verification检查/构建通过；实际部署代码3f69249、容器healthy。真实到达流预算证据INCONCLUSIVE（没有正式请求比较），故维持observe。见[deployment.md](deployment.md)和[operations.md](operations.md)。
+
 ## 已交付的工程
 
 - `decision/preparation.ts`先做原安全核验，再记录市场合格坐标，随后10U买腿/同数量卖腿/最终风险和原模型复核。失败取消原机会，保持锚点；安全未验证者不进入执行分母或报价。
@@ -29,7 +31,7 @@
 
 ## 部署前真实数据证据
 
-2026-09-08 12:49:23 UTC，SEA累计研究响应12047、Info1518；Info无已验证价格来源时间。研究母集按池记录8165行，20个采样名额（不是8165个独立token统计）。正式SENT17、SEND_FAILED50。最近15min请求：200=36、401=4、无HTTP状态=8；稍后仍观察到间歇401与正常200并存。该异常在本批部署前已存在，传输实现强制IPv4；未把它断言为密钥失效，也未修改用户凭据。
+2026-09-08 11:29:23 UTC，SEA累计研究响应12047、Info1518；Info无已验证价格来源时间。研究母集按池记录8165行，20个采样名额（不是8165个独立token统计）。正式SENT17、SEND_FAILED50。最近15min请求：200=36、401=4、无HTTP状态=8；稍后仍观察到间歇401与正常200并存。该异常在本批部署前已存在，传输实现强制IPv4；未把它断言为密钥失效，也未修改用户凭据。
 
 当前主市场基准UNAVAILABLE / PRICE_SOURCE_TIME_UNVERIFIED，不能用接收时刻、HTTP Date或代币创建时刻补填。GMGN官方文档的Kline CLI参数为秒，但CLI转换为API毫秒；现有API毫秒坐标保留，未误改单位。参考[GMGN市场文档](https://raw.githubusercontent.com/GMGNAI/gmgn-skills/main/skills/gmgn-market/SKILL.md)。
 

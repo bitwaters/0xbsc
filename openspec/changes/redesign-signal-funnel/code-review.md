@@ -16,6 +16,8 @@
 | P2   | 被范围缓存引用的事实可能在维护时被删除                 | 归档维护保留range引用；缺口/质量不合格事实不作为完整缓存                                     |
 | P2   | 仅哈希类toString遗漏外部预算/安全辅助实现              | 预算哈希包含完整依赖文件；语义构建递归包含依赖及锁文件，Docker保留package-lock               |
 
+主要修复定位（本批代码）：`src/gmgn/client.ts:103`（研究重试）、`src/research/measurement-store.ts:15`（无准备则无确认）、`src/decision/preparation.ts:171`（合格坐标）、`src/research/runtime.ts:441`（准备时刻冻结）、`src/research/measurement.ts:147`（同数量退出）、`src/research/measurement-store.ts:215`（共同待办上限）、`src/research/contracts.ts:72`（迁移契约哈希）。
+
 尚存的实施边界：2.6的完整新正式发布配置与运行绑定未交付；有效匹配凭据的真实新发布路径不能仅由当前dry-publisher推出。故保持该任务未勾选，validated启动失败而不回退。6.5的最终对照采集运行也未启用；当前ACTUAL回调属于独立测量组，不能伪装成执行准备前的完整对照分母。阶段C实际研究和D/E仍未完成。
 
 本批已实现路径的检查与回归结果见implementation/deployment；不存在通过省略缺失样本、假造PASS或发送测试通知完成验收的行为。
