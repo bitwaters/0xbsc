@@ -123,62 +123,73 @@ export class ResearchStorage {
     });
   }
   recordFact(fact: MarketFact, runId: string, maxBytes: number): Promise<boolean> {
-    return this.storage.transaction(() => {
-      const run = this.storage.db
-        .prepare('SELECT status FROM research_runs WHERE run_id=?')
-        .get(runId) as { status: string } | undefined;
-      if (!run || run.status !== 'ACTIVE') return false;
-      const { payload, ...envelope } = fact;
-      const payloadJson = canonicalJson(payload),
-        envelopeJson = canonicalJson(envelope);
-      const existing = this.storage.db
-        .prepare(
-          'SELECT fact_id,semantic_hash,envelope_json FROM research_facts WHERE attempt_id=? AND endpoint=?'
-        )
-        .get(fact.attemptId, fact.endpoint) as
-        { fact_id: string; semantic_hash: string; envelope_json: string } | undefined;
-      if (
-        existing &&
-        (existing.fact_id !== fact.factId ||
-          existing.semantic_hash !== fact.semanticHash ||
-          existing.envelope_json !== envelopeJson)
+    return this.storage.transaction(() => this.writeFact(fact, runId, maxBytes));
+  }
+  recordFactsBatch(
+    facts: readonly MarketFact[],
+    runId: string,
+    maxBytes: number
+  ): Promise<boolean[]> {
+    if (facts.length > 50) return Promise.reject(new Error('FACT_BATCH_BOUND'));
+    return this.storage.transaction(() =>
+      facts.map((fact) => this.writeFact(fact, runId, maxBytes))
+    );
+  }
+  private writeFact(fact: MarketFact, runId: string, maxBytes: number): boolean {
+    const run = this.storage.db
+      .prepare('SELECT status FROM research_runs WHERE run_id=?')
+      .get(runId) as { status: string } | undefined;
+    if (!run || run.status !== 'ACTIVE') return false;
+    const { payload, ...envelope } = fact;
+    const payloadJson = canonicalJson(payload),
+      envelopeJson = canonicalJson(envelope);
+    const existing = this.storage.db
+      .prepare(
+        'SELECT fact_id,semantic_hash,envelope_json FROM research_facts WHERE attempt_id=? AND endpoint=?'
       )
-        throw new Error('conflicting physical response');
-      if (existing) return false;
-      if (
-        !this.reserveBytes(
-          2 * (Buffer.byteLength(payloadJson) + Buffer.byteLength(envelopeJson)) + 65536,
-          maxBytes
-        )
-      ) {
-        this.storage.db
-          .prepare("UPDATE research_runs SET status='STORAGE_BUDGET_EXHAUSTED' WHERE run_id=?")
-          .run(runId);
-        return false;
-      }
+      .get(fact.attemptId, fact.endpoint) as
+      { fact_id: string; semantic_hash: string; envelope_json: string } | undefined;
+    if (
+      existing &&
+      (existing.fact_id !== fact.factId ||
+        existing.semantic_hash !== fact.semanticHash ||
+        existing.envelope_json !== envelopeJson)
+    )
+      throw new Error('conflicting physical response');
+    if (existing) return false;
+    if (
+      !this.reserveBytes(
+        2 * (Buffer.byteLength(payloadJson) + Buffer.byteLength(envelopeJson)) + 65536,
+        maxBytes
+      )
+    ) {
+      this.storage.db
+        .prepare("UPDATE research_runs SET status='STORAGE_BUDGET_EXHAUSTED' WHERE run_id=?")
+        .run(runId);
+      return false;
+    }
 
-      return (
-        this.storage.db
-          .prepare(
-            `INSERT OR IGNORE INTO research_facts(fact_id,attempt_id,endpoint,chain,token,pool_revision,purpose,queued_at_ms,requested_at_ms,received_at_ms,semantic_hash,envelope_json,payload_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
-          )
-          .run(
-            fact.factId,
-            fact.attemptId,
-            fact.endpoint,
-            fact.chain,
-            fact.token,
-            fact.poolRevision,
-            fact.purpose,
-            fact.queuedAtMs,
-            fact.requestedAtMs,
-            fact.receivedAtMs,
-            fact.semanticHash,
-            envelopeJson,
-            payloadJson
-          ).changes === 1
-      );
-    });
+    return (
+      this.storage.db
+        .prepare(
+          `INSERT OR IGNORE INTO research_facts(fact_id,attempt_id,endpoint,chain,token,pool_revision,purpose,queued_at_ms,requested_at_ms,received_at_ms,semantic_hash,envelope_json,payload_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+        )
+        .run(
+          fact.factId,
+          fact.attemptId,
+          fact.endpoint,
+          fact.chain,
+          fact.token,
+          fact.poolRevision,
+          fact.purpose,
+          fact.queuedAtMs,
+          fact.requestedAtMs,
+          fact.receivedAtMs,
+          fact.semanticHash,
+          envelopeJson,
+          payloadJson
+        ).changes === 1
+    );
   }
   /** Count research table and index pages, plus registered archive bytes. */
   estimatedBytes(): number {

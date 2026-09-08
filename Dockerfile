@@ -6,7 +6,7 @@ COPY tsconfig.json eslint.config.js config.example.yaml ./
 COPY src ./src
 COPY test ./test
 COPY models ./models
-RUN npm run check && npm run build
+RUN npm run typecheck && npm run lint && node --import tsx --test --test-concurrency=4 'test/**/*.test.ts' && npm run build
 
 FROM node:24-bookworm-slim AS dependencies
 WORKDIR /app

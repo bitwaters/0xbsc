@@ -1,3 +1,4 @@
+import type { MarketFact } from '../../src/gmgn/facts.js';
 import { trialReport } from '../../src/research/trial-report.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -290,6 +291,38 @@ void test('pool migration invalidates the persisted old opportunity before any n
     assert.equal(after.state, 'INVALIDATED');
     assert.equal(after.anchor_price, old.anchor_price);
     assert.equal(f.quotes(), 0);
+  } finally {
+    await f.runtime.close();
+    f.storage.close();
+  }
+});
+
+void test('a failed preparation evidence batch rolls back every fact instead of leaving a partial batch', async () => {
+  const f = await fixture();
+  try {
+    await f.runtime.tick();
+    const row = f.storage.db
+      .prepare('SELECT envelope_json,payload_json FROM research_facts LIMIT 1')
+      .get() as { envelope_json: string; payload_json: string };
+    const first = {
+      ...(JSON.parse(row.envelope_json) as Omit<MarketFact, 'payload'>),
+      payload: JSON.parse(row.payload_json) as Record<string, unknown>,
+      factId: 'batch-first',
+      attemptId: 'batch-attempt'
+    };
+    const conflict = { ...first, factId: 'batch-conflict' };
+    await assert.rejects(
+      f.runtime.research.recordFactsBatch([first, conflict], f.runtime.runId, 2 * 1024 ** 3),
+      /conflicting physical response/
+    );
+    assert.equal(
+      f.storage.db.prepare("SELECT 1 FROM research_facts WHERE attempt_id='batch-attempt'").get(),
+      undefined
+    );
+    assert.deepEqual(
+      await f.runtime.research.recordFactsBatch([first], f.runtime.runId, 2 * 1024 ** 3),
+      [true]
+    );
   } finally {
     await f.runtime.close();
     f.storage.close();

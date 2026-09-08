@@ -121,7 +121,7 @@ export class TrialRuntime {
             const info = await adapter.fact(() => api.token('/v1/token/info', state.token));
             if (info.poolRevision !== state.poolRevision) throw new Error('EXIT_POOL_CHANGED');
             const sell = await adapter.sell(decisionContext(state, riskPolicyHash(config)), buy);
-            for (const fact of adapter.facts) await this.saveFact(fact);
+            await this.saveFacts(adapter.facts);
             return sell;
           }
         );
@@ -255,6 +255,17 @@ export class TrialRuntime {
       !this.storage.db.prepare('SELECT 1 FROM research_facts WHERE fact_id=?').get(fact.factId)
     )
       throw new Error('TRIAL_FACT_STORAGE_UNAVAILABLE');
+  }
+  private async saveFacts(facts: readonly MarketFact[]) {
+    const results = await this.research.recordFactsBatch(facts, this.runId, MAX_BYTES);
+    for (const [index, ok] of results.entries())
+      if (
+        !ok &&
+        !this.storage.db
+          .prepare('SELECT 1 FROM research_facts WHERE fact_id=?')
+          .get(facts[index]!.factId)
+      )
+        throw new Error('TRIAL_FACT_STORAGE_UNAVAILABLE');
   }
   private async calibrate() {
     const checkpoint = this.research.quotaCheckpoint();
@@ -446,7 +457,7 @@ export class TrialRuntime {
           });
           this.count(result.status === 'DRY_READY' ? 'PREPARATION_PASS' : result.reason);
           const preparedAtMs = this.clock.now();
-          for (const fact of adapter.facts) await this.saveFact(fact);
+          await this.saveFacts(adapter.facts);
           if (result.status === 'CANCELLED') {
             await this.research.saveOpportunity(this.runId, result.state, decision.state.version);
             return;
@@ -557,9 +568,14 @@ export class TrialRuntime {
         const adapter = new LiveOpportunityAdapter(this.api, this.config, [], {} as MarketFact);
         const buy = await withGmgnContext(
           { priority: 'evaluation', purpose: 'baseline', deadlineMs: confirmedAtMs + 5000 },
-          () => adapter.buy(d.context)
+          async () => {
+            const info = await adapter.fact(() => this.api.token('/v1/token/info', d.tokenAddress));
+            if (info.poolRevision !== d.context.poolRevision)
+              throw new Error('BASELINE_POOL_CHANGED');
+            return adapter.buy(d.context);
+          }
         );
-        for (const fact of adapter.facts) await this.saveFact(fact);
+        await this.saveFacts(adapter.facts);
         await this.storage.write(() =>
           this.storage.db
             .prepare('INSERT OR IGNORE INTO research_registrations VALUES (?,?,?,?,?,?)')
