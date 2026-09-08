@@ -252,15 +252,10 @@ export class TrialRuntime {
     };
   }
   private async saveFact(fact: MarketFact) {
-    const ok = await this.research.recordFact(fact, this.runId, MAX_BYTES);
-    if (
-      !ok &&
-      !this.storage.db.prepare('SELECT 1 FROM research_facts WHERE fact_id=?').get(fact.factId)
-    )
-      throw new Error('TRIAL_FACT_STORAGE_UNAVAILABLE');
+    await this.saveFacts([fact]);
   }
   private async saveFacts(facts: readonly MarketFact[]) {
-    const results = await this.research.recordFactsBatch(facts, this.runId, MAX_BYTES);
+    const results = await this.research.recordFactsBatch(facts, this.runId, MAX_BYTES, true);
     for (const [index, ok] of results.entries())
       if (
         !ok &&

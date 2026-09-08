@@ -154,6 +154,23 @@ void test('activated candidate completes confirmation ahead of the untouched dis
     }
     const pending = await f.storage.pendingOutboxSignals(f.now(), true, 'opportunity-v1');
     assert.equal(pending.length, 1, JSON.stringify(f.runtime.snapshot()));
+    assert.ok(
+      (
+        f.storage.db
+          .prepare('SELECT COUNT(*) AS n FROM research_fact_references WHERE run_id=?')
+          .get(f.runtime.runId) as { n: number }
+      ).n > 0
+    );
+    assert.equal(
+      (
+        f.storage.db
+          .prepare(
+            'SELECT COUNT(*) AS n FROM research_facts f WHERE NOT EXISTS(SELECT 1 FROM research_fact_references r WHERE r.fact_id=f.fact_id AND r.run_id=?)'
+          )
+          .get(f.runtime.runId) as { n: number }
+      ).n,
+      0
+    );
     assert.equal(f.runtime.snapshot().counts.MARKET_READY_RESEARCH_ONLY, 2);
   } finally {
     await f.runtime.close();
@@ -336,16 +353,34 @@ void test('a failed preparation evidence batch rolls back every fact instead of 
     };
     const conflict = { ...first, factId: 'batch-conflict' };
     await assert.rejects(
-      f.runtime.research.recordFactsBatch([first, conflict], f.runtime.runId, 2 * 1024 ** 3),
+      f.runtime.research.recordFactsBatch([first, conflict], f.runtime.runId, 2 * 1024 ** 3, true),
       /conflicting physical response/
     );
     assert.equal(
       f.storage.db.prepare("SELECT 1 FROM research_facts WHERE attempt_id='batch-attempt'").get(),
       undefined
     );
+    assert.equal(
+      f.storage.db
+        .prepare("SELECT 1 FROM research_fact_references WHERE fact_id='batch-first'")
+        .get(),
+      undefined
+    );
     assert.deepEqual(
-      await f.runtime.research.recordFactsBatch([first], f.runtime.runId, 2 * 1024 ** 3),
+      await f.runtime.research.recordFactsBatch([first], f.runtime.runId, 2 * 1024 ** 3, true),
       [true]
+    );
+    assert.deepEqual(
+      await f.runtime.research.recordFactsBatch([first], f.runtime.runId, 2 * 1024 ** 3, true),
+      [false]
+    );
+    assert.equal(
+      (
+        f.storage.db
+          .prepare("SELECT COUNT(*) AS n FROM research_fact_references WHERE fact_id='batch-first'")
+          .get() as { n: number }
+      ).n,
+      1
     );
   } finally {
     await f.runtime.close();

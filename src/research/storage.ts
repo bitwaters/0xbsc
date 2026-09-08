@@ -128,11 +128,33 @@ export class ResearchStorage {
   recordFactsBatch(
     facts: readonly MarketFact[],
     runId: string,
-    maxBytes: number
+    maxBytes: number,
+    referenceRun = false
   ): Promise<boolean[]> {
     if (facts.length > 50) return Promise.reject(new Error('FACT_BATCH_BOUND'));
     return this.storage.transaction(() =>
-      facts.map((fact) => this.writeFact(fact, runId, maxBytes))
+      facts.map((fact) => {
+        const inserted = this.writeFact(fact, runId, maxBytes);
+        if (
+          referenceRun &&
+          (inserted ||
+            this.storage.db
+              .prepare('SELECT 1 FROM research_facts WHERE fact_id=?')
+              .get(fact.factId))
+        ) {
+          const known = this.storage.db
+            .prepare('SELECT 1 FROM research_fact_references WHERE run_id=? AND fact_id=?')
+            .get(runId, fact.factId);
+          if (!known) {
+            if (!this.reserveReferenceBytes(1, maxBytes))
+              throw new Error('TRIAL_FACT_REFERENCE_STORAGE_UNAVAILABLE');
+            this.storage.db
+              .prepare('INSERT INTO research_fact_references(run_id,fact_id) VALUES (?,?)')
+              .run(runId, fact.factId);
+          }
+        }
+        return inserted;
+      })
     );
   }
   private writeFact(fact: MarketFact, runId: string, maxBytes: number): boolean {
