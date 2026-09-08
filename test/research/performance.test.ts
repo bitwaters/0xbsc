@@ -138,3 +138,58 @@ void test('audit retention uses bounded time and recovery indexes even with no e
     storage.close();
   }
 });
+
+void test('duplicate discovery events do not write timestamps or add WAL churn', async () => {
+  const storage = await Storage.open(':memory:');
+  try {
+    const original = event(10);
+    assert.equal(await storage.persistDiscoveryEvent(original), true);
+    const before = storage.db.prepare('SELECT total_changes() n').get();
+    assert.equal(await storage.persistDiscoveryEvent({ ...original, observedAtMs: 9000 }), false);
+    assert.deepEqual(storage.db.prepare('SELECT total_changes() n').get(), before);
+    assert.deepEqual(storage.db.prepare('SELECT updated_at_ms FROM tokens').get(), {
+      updated_at_ms: 1000
+    });
+  } finally {
+    storage.close();
+  }
+});
+
+void test('research batching is bounded and rolls back on failure without committing a partial batch', async () => {
+  const storage = await Storage.open(':memory:');
+  try {
+    const research = new ResearchStorage(storage);
+    await research.startRun('run', {}, 0);
+    research.calibrateQuota(100000, 0);
+    await assert.rejects(
+      research.recordUniverseBatch(
+        Array.from({ length: 51 }, (_, i) => event(i)),
+        'run',
+        'seed'
+      ),
+      /TOO_LARGE/
+    );
+    storage.db.exec(
+      "CREATE TRIGGER batch_fault BEFORE INSERT ON research_universe WHEN NEW.token='" +
+        event(2).tokenAddress +
+        "' BEGIN SELECT RAISE(ABORT,'injected fault'); END;"
+    );
+    await assert.rejects(
+      research.recordUniverseBatch([event(1), event(2)], 'run', 'seed'),
+      /injected fault/
+    );
+    assert.deepEqual(storage.db.prepare('SELECT count(*) n FROM research_universe').get(), {
+      n: 0
+    });
+    assert.deepEqual(storage.db.prepare('SELECT count(*) n FROM research_sampling').get(), {
+      n: 0
+    });
+    storage.db.exec('DROP TRIGGER batch_fault');
+    await research.recordUniverseBatch([event(1), event(2)], 'run', 'seed');
+    assert.deepEqual(storage.db.prepare('SELECT count(*) n FROM research_universe').get(), {
+      n: 2
+    });
+  } finally {
+    storage.close();
+  }
+});

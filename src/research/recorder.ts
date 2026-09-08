@@ -96,11 +96,15 @@ export class ResearchRecorder {
         while (this.events.size && !this.stoppedReason && !this.closed) {
           await yieldToIO();
           if (this.closed || this.stoppedReason) break;
-          const next = this.events.values().next().value!;
-          this.events.delete(next.key);
-          // One queued writer at a time lets formal work interleave with a large discovery batch.
-          await this.research.recordUniverse(
-            next,
+          const batch: NormalizedEvent[] = [];
+          for (const [key, event] of this.events) {
+            this.events.delete(key);
+            batch.push(event);
+            if (batch.length === 50) break;
+          }
+          // Batch only research writes; release the event loop between bounded commits.
+          await this.research.recordUniverseBatch(
+            batch,
             this.config.run_id,
             this.config.run_id,
             20,

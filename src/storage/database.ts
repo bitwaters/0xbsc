@@ -197,6 +197,8 @@ export class Storage {
 
   persistDiscoveryEvent(event: NormalizedEvent): Promise<boolean> {
     return this.transaction(() => {
+      // Duplicate source IDs are read-only: do not fsync a token timestamp for each poll replay.
+      if (this.db.prepare('SELECT 1 FROM events WHERE event_key=?').get(event.key)) return false;
       this.db
         .prepare(
           `INSERT INTO tokens (chain, address, first_seen_at_ms, updated_at_ms)

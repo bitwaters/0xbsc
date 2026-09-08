@@ -216,101 +216,121 @@ export class ResearchStorage {
     capacity = 20,
     maxBytes = 2 * 1024 ** 3
   ): Promise<void> {
+    return this.recordUniverseBatch([event], runId, seed, capacity, maxBytes);
+  }
+  /** One small research-only transaction; no formal publication writes are batched. */
+  recordUniverseBatch(
+    events: readonly NormalizedEvent[],
+    runId: string,
+    seed: string,
+    capacity = 20,
+    maxBytes = 2 * 1024 ** 3
+  ): Promise<void> {
+    if (events.length > 50) return Promise.reject(new Error('RESEARCH_BATCH_TOO_LARGE'));
     return this.storage.transaction(() => {
-      const run = this.storage.db
-        .prepare('SELECT status,sampling_epoch FROM research_runs WHERE run_id=?')
-        .get(runId) as { status: string; sampling_epoch: number } | undefined;
-      if (!run || run.status !== 'ACTIVE') return;
-      const known = this.storage.db
-        .prepare(
-          'SELECT 1 FROM research_sampling WHERE run_id=? AND chain=? AND token=? AND pool_revision=?'
-        )
-        .get(
-          runId,
-          event.chain,
-          event.tokenAddress,
-          typeof event.payload.biggest_pool_address === 'string' &&
-            /^0x[0-9a-f]{40}$/i.test(event.payload.biggest_pool_address)
-            ? event.payload.biggest_pool_address.toLowerCase()
-            : 'unresolved'
-        );
-      if (!this.reserveBytes(known ? 128 : 65536 + 2 * Buffer.byteLength(event.key), maxBytes)) {
-        this.storage.db
-          .prepare("UPDATE research_runs SET status='STORAGE_BUDGET_EXHAUSTED' WHERE run_id=?")
-          .run(runId);
-        return;
-      }
-      const pool =
-        typeof event.payload.biggest_pool_address === 'string' &&
-        /^0x[0-9a-f]{40}$/i.test(event.payload.biggest_pool_address)
-          ? event.payload.biggest_pool_address.toLowerCase()
-          : 'unresolved';
-      const stratum =
-        event.decisionEligible === false || event.payload.contrary === true
-          ? 'risk_observation'
-          : 'discovered';
-      this.storage.db
-        .prepare(
-          `INSERT INTO research_universe(chain,token,pool_revision,first_seen_at_ms,latest_seen_at_ms,first_event_key,stratum) VALUES (?,?,?,?,?,?,?) ON CONFLICT(chain,token,pool_revision) DO UPDATE SET latest_seen_at_ms=MAX(latest_seen_at_ms,excluded.latest_seen_at_ms)`
-        )
-        .run(
-          event.chain,
-          event.tokenAddress,
-          pool,
-          event.observedAtMs,
-          event.observedAtMs,
-          event.key,
-          stratum
-        );
-      const hash = createHash('sha256')
-        .update(canonicalJson([seed, event.chain, event.tokenAddress, pool]))
-        .digest('hex');
-      this.storage.db
-        .prepare(
-          `INSERT OR IGNORE INTO research_sampling(run_id,chain,token,pool_revision,sample_key,stratum,inclusion_probability,status,updated_at_ms) VALUES (?,?,?,?,?,?,0,'RESOURCE_EXCLUDED',?)`
-        )
-        .run(runId, event.chain, event.tokenAddress, pool, hash, stratum, event.observedAtMs);
-      const epoch = Math.floor(event.observedAtMs / 60000);
-      // Freeze one sampling frame per minute. Incoming events still enter the universe,
-      // but cannot force an O(universe) rebalance on every physical response.
-      if (run.sampling_epoch === epoch) return;
-      this.storage.db
-        .prepare('UPDATE research_runs SET sampling_epoch=? WHERE run_id=?')
-        .run(epoch, runId);
-      const rows = this.storage.db
-        .prepare(
-          'SELECT rowid,stratum,sample_key FROM research_sampling WHERE run_id=? ORDER BY stratum,sample_key'
-        )
-        .all(runId) as { rowid: number; stratum: string; sample_key: string }[];
-      const groups = new Map<string, typeof rows>();
-      for (const row of rows) {
-        const group = groups.get(row.stratum) ?? [];
-        group.push(row);
-        groups.set(row.stratum, group);
-      }
-      const rotated = [...groups.values()].map((group) => {
-        const offset = (epoch * capacity) % group.length;
-        return [...group.slice(offset), ...group.slice(0, offset)];
-      });
-      const selected = new Set<number>();
-      for (let rank = 0; rank < rows.length && selected.size < capacity; rank++)
-        for (const group of rotated) {
-          const row = group[rank];
-          if (row && selected.size < capacity) selected.add(row.rowid);
-        }
-      const updateSample = this.storage.db.prepare(
-        'UPDATE research_sampling SET status=?,inclusion_probability=?,updated_at_ms=? WHERE rowid=?'
-      );
-      for (const group of groups.values()) {
-        const probability = group.filter((row) => selected.has(row.rowid)).length / group.length;
-        for (const row of group)
-          updateSample.run(
-            selected.has(row.rowid) ? 'SELECTED' : 'RESOURCE_EXCLUDED',
-            probability,
-            event.observedAtMs,
-            row.rowid
-          );
-      }
+      for (const event of events) this.writeUniverse(event, runId, seed, capacity, maxBytes);
     });
+  }
+  private writeUniverse(
+    event: NormalizedEvent,
+    runId: string,
+    seed: string,
+    capacity: number,
+    maxBytes: number
+  ): void {
+    const run = this.storage.db
+      .prepare('SELECT status,sampling_epoch FROM research_runs WHERE run_id=?')
+      .get(runId) as { status: string; sampling_epoch: number } | undefined;
+    if (!run || run.status !== 'ACTIVE') return;
+    const known = this.storage.db
+      .prepare(
+        'SELECT 1 FROM research_sampling WHERE run_id=? AND chain=? AND token=? AND pool_revision=?'
+      )
+      .get(
+        runId,
+        event.chain,
+        event.tokenAddress,
+        typeof event.payload.biggest_pool_address === 'string' &&
+          /^0x[0-9a-f]{40}$/i.test(event.payload.biggest_pool_address)
+          ? event.payload.biggest_pool_address.toLowerCase()
+          : 'unresolved'
+      );
+    if (!this.reserveBytes(known ? 128 : 65536 + 2 * Buffer.byteLength(event.key), maxBytes)) {
+      this.storage.db
+        .prepare("UPDATE research_runs SET status='STORAGE_BUDGET_EXHAUSTED' WHERE run_id=?")
+        .run(runId);
+      return;
+    }
+    const pool =
+      typeof event.payload.biggest_pool_address === 'string' &&
+      /^0x[0-9a-f]{40}$/i.test(event.payload.biggest_pool_address)
+        ? event.payload.biggest_pool_address.toLowerCase()
+        : 'unresolved';
+    const stratum =
+      event.decisionEligible === false || event.payload.contrary === true
+        ? 'risk_observation'
+        : 'discovered';
+    this.storage.db
+      .prepare(
+        `INSERT INTO research_universe(chain,token,pool_revision,first_seen_at_ms,latest_seen_at_ms,first_event_key,stratum) VALUES (?,?,?,?,?,?,?) ON CONFLICT(chain,token,pool_revision) DO UPDATE SET latest_seen_at_ms=MAX(latest_seen_at_ms,excluded.latest_seen_at_ms)`
+      )
+      .run(
+        event.chain,
+        event.tokenAddress,
+        pool,
+        event.observedAtMs,
+        event.observedAtMs,
+        event.key,
+        stratum
+      );
+    const hash = createHash('sha256')
+      .update(canonicalJson([seed, event.chain, event.tokenAddress, pool]))
+      .digest('hex');
+    this.storage.db
+      .prepare(
+        `INSERT OR IGNORE INTO research_sampling(run_id,chain,token,pool_revision,sample_key,stratum,inclusion_probability,status,updated_at_ms) VALUES (?,?,?,?,?,?,0,'RESOURCE_EXCLUDED',?)`
+      )
+      .run(runId, event.chain, event.tokenAddress, pool, hash, stratum, event.observedAtMs);
+    const epoch = Math.floor(event.observedAtMs / 60000);
+    // Freeze one sampling frame per minute. Incoming events still enter the universe,
+    // but cannot force an O(universe) rebalance on every physical response.
+    if (run.sampling_epoch === epoch) return;
+    this.storage.db
+      .prepare('UPDATE research_runs SET sampling_epoch=? WHERE run_id=?')
+      .run(epoch, runId);
+    const rows = this.storage.db
+      .prepare(
+        'SELECT rowid,stratum,sample_key FROM research_sampling WHERE run_id=? ORDER BY stratum,sample_key'
+      )
+      .all(runId) as { rowid: number; stratum: string; sample_key: string }[];
+    const groups = new Map<string, typeof rows>();
+    for (const row of rows) {
+      const group = groups.get(row.stratum) ?? [];
+      group.push(row);
+      groups.set(row.stratum, group);
+    }
+    const rotated = [...groups.values()].map((group) => {
+      const offset = (epoch * capacity) % group.length;
+      return [...group.slice(offset), ...group.slice(0, offset)];
+    });
+    const selected = new Set<number>();
+    for (let rank = 0; rank < rows.length && selected.size < capacity; rank++)
+      for (const group of rotated) {
+        const row = group[rank];
+        if (row && selected.size < capacity) selected.add(row.rowid);
+      }
+    const updateSample = this.storage.db.prepare(
+      'UPDATE research_sampling SET status=?,inclusion_probability=?,updated_at_ms=? WHERE rowid=?'
+    );
+    for (const group of groups.values()) {
+      const probability = group.filter((row) => selected.has(row.rowid)).length / group.length;
+      for (const row of group)
+        updateSample.run(
+          selected.has(row.rowid) ? 'SELECTED' : 'RESOURCE_EXCLUDED',
+          probability,
+          event.observedAtMs,
+          row.rowid
+        );
+    }
   }
 }
