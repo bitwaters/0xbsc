@@ -937,14 +937,14 @@ const discovery = new DiscoveryRuntime({
   api,
   scheduler,
   clock,
-  onEvent: trialRuntime
-    ? (event) => {
-        trialRuntime.observe(event);
-        return Promise.resolve();
+  onEvent: trialRuntime ? () => Promise.resolve() : processCandidate,
+  ...(researchRecorder || trialRuntime
+    ? {
+        onUniverseObserved: (event: NormalizedEvent) => {
+          researchRecorder?.event(event);
+          trialRuntime?.observe(event);
+        }
       }
-    : processCandidate,
-  ...(researchRecorder
-    ? { onUniverseObserved: (event: NormalizedEvent) => researchRecorder.event(event) }
     : {}),
   onEventObserved: (_event, persisted) => {
     if (!isTrial && persisted && safety.precheck(_event).allowed) routes.observe(_event);

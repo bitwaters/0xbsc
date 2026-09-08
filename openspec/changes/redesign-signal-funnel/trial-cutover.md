@@ -43,9 +43,9 @@
 ## 发布与结果隔离
 
 - Compose 默认 trial；应用无 publication 配置仍兼容 legacy。模型哈希不匹配启动失败，不静默回退。现有 SEA `.env` 和 config 凭据不变。
-- trial 不调用旧 `processCandidate`、旧 observation/prewatch loop 或旧 pre-send 重分类；outbox 只消费 `opportunity-v1`。legacy 只消费 `legacy-v1`。
+- trial 通过过滤前的 onUniverseObserved 接收公共发现，不依赖旧排名/快照证据；trial 不调用旧 `processCandidate`、旧 observation/prewatch loop 或旧 pre-send 重分类；outbox 只消费 `opportunity-v1`。legacy 只消费 `legacy-v1`。
 - 旧 episodes.route 的 `continuation` 仅作为原表约束下的投递兼容槽位，score/completeness 为 NULL；新模型以 decision_format/modelHash/runId 明确识别。任何新规则分析都不得按这个兼容槽位归类为旧延续策略。无重建历史大表。
-- 原始发现事件仍保存，入选/资源排除追加 trial_funnel 审计。观察集最多50个，按最早到期公平轮询，每个最多观察10分钟，2分钟没有新发现则释放；容量排除不是市场失败。执行用途仍占正式额度，已停用旧正式请求，不能把它当作影子2权重/s实验。
+- 原始发现事件仍保存，入选/资源排除追加 trial_funnel 审计。观察集最多50个，按最早到期公平轮询，每个最多观察10分钟，2分钟没有新发现则释放；满30秒且已有至少两份观测但仍未激活者释放名额，30秒后可以重新入选，避免固定热集长期占位；容量排除不是市场失败。执行用途仍占正式额度，已停用旧正式请求，不能把它当作影子2权重/s实验。
 - 每个 trial run 绑定模型、风险和语义代码哈希。新代码不能无痕混入旧 run。正式所用事实/原锚点持久化，发送快照含原行情和安全/报价证据。
 - 卡片参考轨道 `trial_card_reference_v1` 保留原收到时间和价格。它只能解释相对卡片参考价的后续路径；Info来源时钟未知，不能称为可靠的确认后成交收益。
 - `post_confirmation_market_v1` 如实保留 UNVERIFIED，不用HTTP Date/收到时间冒充来源时间。
@@ -66,8 +66,10 @@
 - [x] 明确用户授权范围、单一模型和试运行标签。
 - [x] 新正式入口、原安全与同数量双向报价、冻结投递和跨版本锁。
 - [x] 独立测量、重启恢复和只读报告。
-- [x] 全量 CI、风险回归与发布文件检查：351/351，类型/lint/build、OpenSpec strict、Docker verification通过；无网络只读容器启动通过。
+- [x] 全量 CI、风险回归与发布文件检查：352/352，类型/lint/build、OpenSpec strict、Docker verification通过；无网络只读容器启动通过。
 - [ ] 推送 GitHub、SEA 拉取并 Compose 部署。
 - [ ] 检查版本、实际 trial 漏斗、限流/延迟、旧入口关闭和历史数据保留。
 
 部署证据将在本轮完成后补充；本文件不能单凭待办勾选证明市场效果。
+
+首轮云端构建未激活服务：并发测试连续100次fsync写入使后台测试连接超过5秒busy_timeout。现改为可重复的“后台先持有写锁、前台等待后读写”的交错测试，直接覆盖原快照升级缺陷；未关闭FULL、未跳过测试。公共母集审计按最多50条单事务批量写入，避免发现突发重新形成逐条fsync阻塞。

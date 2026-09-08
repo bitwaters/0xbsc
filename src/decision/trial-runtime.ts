@@ -55,6 +55,8 @@ export class TrialRuntime {
   private failure: string | null = null;
   private readonly codeHash = semanticBuild().hash;
   private universeRecorded = new Map<string, number>();
+  private admissionAfter = new Map<string, number>();
+  private universePending: { atMs: number; metadata: Record<string, unknown> }[] = [];
   constructor(
     private readonly storage: Storage,
     private readonly config: RuntimeConfig,
@@ -136,6 +138,8 @@ export class TrialRuntime {
         model: this.model.manifest,
         riskHash: riskPolicyHash(this.config),
         maxWatched: 50,
+        inactiveRotationMs: 30000,
+        readmissionDelayMs: 30000,
         pollMs: 10000
       },
       this.clock.now()
@@ -176,6 +180,8 @@ export class TrialRuntime {
       existing.seenAtMs = now;
       return;
     }
+    if ((this.admissionAfter.get(event.tokenAddress) ?? 0) > now) return;
+    this.admissionAfter.delete(event.tokenAddress);
     if (this.watches.size >= 50) {
       this.recordUniverse(event, 'RESOURCE_EXCLUDED');
       this.count('WATCH_CAPACITY_EXCLUDED');
@@ -197,22 +203,32 @@ export class TrialRuntime {
     if (now - (this.universeRecorded.get(key) ?? -Infinity) < 60000) return;
     if (this.universeRecorded.size >= 2000) this.universeRecorded.clear();
     this.universeRecorded.set(key, now);
-    void this.storage
-      .recordOperationTrace({
-        correlationId: randomUUID(),
-        stage: 'trial_funnel',
-        occurredAtMs: now,
-        metadata: {
-          runId: this.runId,
-          token: event.tokenAddress,
-          eventKey: event.key,
-          reason: status
-        }
-      })
-      .catch(() => {
-        this.failure = 'TRIAL_UNIVERSE_AUDIT_FAILED';
-      });
+    if (this.universePending.length >= 2000) {
+      this.failure = 'TRIAL_UNIVERSE_BACKLOG';
+      return;
+    }
+    this.universePending.push({
+      atMs: now,
+      metadata: {
+        runId: this.runId,
+        token: event.tokenAddress,
+        eventKey: event.key,
+        reason: status
+      }
+    });
   }
+  private async drainUniverse() {
+    const batch = this.universePending.slice(0, 50);
+    if (!batch.length) return;
+    await this.storage.transaction(() => {
+      const insert = this.storage.db.prepare(
+        "INSERT INTO operation_traces(correlation_id,stage,occurred_at_ms,metadata_json) VALUES (?,'trial_funnel',?,?)"
+      );
+      for (const row of batch) insert.run(randomUUID(), row.atMs, JSON.stringify(row.metadata));
+    });
+    this.universePending.splice(0, batch.length);
+  }
+
   private count(reason: string) {
     this.counts[reason] = (this.counts[reason] ?? 0) + 1;
   }
@@ -225,6 +241,7 @@ export class TrialRuntime {
       runId: this.runId,
       validation: 'UNVALIDATED',
       watching: this.watches.size,
+      pendingUniverseWrites: this.universePending.length,
       running: this.running,
       lastTickAtMs: this.lastTickAtMs,
       failure: this.failure,
@@ -268,6 +285,7 @@ export class TrialRuntime {
     this.running = true;
     this.lastTickAtMs = this.clock.now();
     try {
+      await this.drainUniverse();
       for (const [key, w] of this.watches)
         if (this.clock.now() - w.seenAtMs > 120000 || this.clock.now() - w.firstAtMs > 600000)
           this.watches.delete(key);
@@ -363,6 +381,17 @@ export class TrialRuntime {
               opportunityId: decision.state.opportunityId
             }
           });
+          if (
+            decision.state.status === 'WATCHING' &&
+            this.clock.now() - watch.firstAtMs >= 30000 &&
+            watch.facts.length >= 2
+          ) {
+            this.watches.delete(watch.token);
+            if (this.admissionAfter.size >= 2000) this.admissionAfter.clear();
+            this.admissionAfter.set(watch.token, this.clock.now() + 30000);
+            this.count('INACTIVE_WATCH_ROTATED');
+            return;
+          }
           if (decision.state.status !== 'READY' || decision.reason === 'DATA_WAIT') return;
           const now = this.clock.now(),
             minimum =
@@ -562,5 +591,6 @@ export class TrialRuntime {
     this.closed = true;
     while (this.running || this.outcomesRunning || this.maintenanceRunning)
       await this.clock.sleep(50);
+    while (this.universePending.length) await this.drainUniverse();
   }
 }

@@ -442,3 +442,41 @@ void test('continues discovery polling while downstream analysis is running', as
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+void test('public universe includes candidates excluded by legacy ranking and snapshot deduplication', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { parse } = await import('yaml');
+  const { runtimeConfigSchema } = await import('../../src/config/load.js');
+  const config = runtimeConfigSchema.parse(parse(readFileSync('config.example.yaml', 'utf8')));
+  config.polling.trending_max_rank = 1;
+  const storage = await Storage.open(':memory:'),
+    clock = new TestClock();
+  const universe: string[] = [];
+  const runtime = new DiscoveryRuntime({
+    config,
+    storage,
+    clock,
+    scheduler: new GmgnScheduler(clock),
+    api: {
+      rank: () =>
+        Promise.resolve({
+          data: {
+            rank: [
+              { address: '0x' + 'a'.repeat(40), rank: 1 },
+              { address: '0x' + 'b'.repeat(40), rank: 2 }
+            ]
+          }
+        })
+    } as never,
+    onUniverseObserved: (event) => universe.push(event.tokenAddress)
+  });
+  try {
+    assert.equal(await runtime.tick('trending:1m'), 1);
+    assert.equal(universe.length, 2);
+    clock.value += config.polling.trending_seconds * 1000;
+    assert.equal(await runtime.tick('trending:1m'), 0);
+    assert.equal(universe.length, 4);
+  } finally {
+    storage.close();
+  }
+});
