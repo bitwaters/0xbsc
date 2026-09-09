@@ -35,6 +35,7 @@ const MAX_BYTES = 2 * 1024 ** 3;
 interface Watch {
   token: string;
   key: string;
+  revisit?: boolean;
   queuedAtMs: number;
   basicAtMs?: number;
   firstAtMs: number;
@@ -179,7 +180,8 @@ export class TrialRuntime {
         riskHash: riskPolicyHash(this.config),
         maxWatched: 50,
         admission: {
-          policy: 'fifo-v1',
+          policy: 'fresh-and-revisit-fifo-v2',
+          maximumFreshStreak: 3,
           capacity: this.rotation.capacity,
           staleMs: this.rotation.liveMs
         },
@@ -307,6 +309,7 @@ export class TrialRuntime {
         firstQueuedAtMs: w.queuedAtMs,
         seenAtMs: w.seenAtMs,
         eligibleAtMs: now,
+        revisit: w.revisit ?? false,
         ...(w.pool ? { pool: w.pool } : {})
       });
     await this.storage.transaction(() => {
@@ -327,6 +330,7 @@ export class TrialRuntime {
       firstQueuedAtMs: this.clock.now(),
       seenAtMs: w.seenAtMs,
       eligibleAtMs,
+      revisit: true,
       ...(w.pool ? { pool: w.pool } : {})
     });
     if (status === 'overflow') {
@@ -352,6 +356,7 @@ export class TrialRuntime {
       this.watches.set(candidate.tokenAddress, {
         token: candidate.tokenAddress,
         key: candidate.key,
+        revisit: candidate.revisit ?? false,
         queuedAtMs: candidate.firstQueuedAtMs,
         firstAtMs: now,
         seenAtMs: candidate.seenAtMs,
@@ -580,7 +585,10 @@ export class TrialRuntime {
             return;
           }
           await this.saveFact(info);
-          this.recordUniverse({ tokenAddress: watch.token, key: watch.key }, 'INFO_OBSERVED');
+          this.recordUniverse({ tokenAddress: watch.token, key: watch.key }, 'INFO_OBSERVED', {
+            lane: watch.revisit ? 'revisit' : 'fresh',
+            waitMs: this.clock.now() - watch.queuedAtMs
+          });
           if (info.poolRevision === 'unresolved') {
             this.recordUniverse(
               { tokenAddress: watch.token, key: watch.key },

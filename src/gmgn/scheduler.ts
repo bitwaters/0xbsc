@@ -308,13 +308,30 @@ export class GmgnScheduler {
             queued.reject(new Error('EXECUTION_NOT_EVALUATED_RESOURCE'));
           }
         }
-        const index = this.#queue.findIndex(
-          (x) =>
-            (!x.task.research || this.#researchInFlight === 0) &&
-            (!x.task.channel ||
-              (!this.#channels.has(x.task.channel) &&
-                (this.#channelNextAtMs[x.task.channel] ?? 0) <= now))
-        );
+        const channelReady = (x: QueueItem) =>
+          (!x.task.research || this.#researchInFlight === 0) &&
+          (!x.task.channel ||
+            (!this.#channels.has(x.task.channel) &&
+              (this.#channelNextAtMs[x.task.channel] ?? 0) <= now));
+        // An endless candidate stream must not starve outcome/baseline work.
+        // Aging only affects non-formal selection; research still needs its own budget.
+        const aged = !formalBusy
+          ? this.#queue
+              .filter(
+                (x) =>
+                priorityRank[x.task.priority] >= 1 &&
+                  now - x.queuedAtMs >= 1000 &&
+                  channelReady(x) &&
+                  (!x.task.research ||
+                    this.researchBudget.waitMs(x.task.weight, now, x.task.channel === 'quote') ===
+                      0)
+              )
+              .reduce<QueueItem | undefined>(
+                (oldest, x) => (!oldest || x.queuedAtMs < oldest.queuedAtMs ? x : oldest),
+                undefined
+              )
+          : undefined;
+        const index = aged ? this.#queue.indexOf(aged) : this.#queue.findIndex(channelReady);
         if (index < 0) {
           const wake = Math.min(
             ...this.#queue

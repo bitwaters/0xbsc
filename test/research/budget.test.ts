@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { setImmediate } from 'node:timers/promises';
 import { ResearchBudget } from '../../src/research/budget.js';
 import { GmgnScheduler } from '../../src/gmgn/scheduler.js';
 void test('research empty bucket admits weight five after 2.5 seconds and enforces minute quote quota', () => {
@@ -102,4 +103,53 @@ void test('unregistered research pacing fails and recovered monitoring requires 
     }),
     /deadline/
   );
+});
+
+void test('bounded outcome work cannot starve behind a continuous candidate backlog', async () => {
+  let now = 0,
+    release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const clock = {
+    now: () => now,
+    sleep: (ms: number) => {
+      now += ms;
+      return Promise.resolve();
+    },
+    random: () => 0
+  };
+  const scheduler = new GmgnScheduler(clock, 14, 20, 6, {
+    researchEnabled: true,
+    paced: true,
+    maxConcurrent: 1
+  });
+  const first = scheduler.schedule({ weight: 1, priority: 'candidate', run: () => gate });
+  await setImmediate();
+  const order: string[] = [];
+  const outcome = scheduler.schedule({
+    weight: 1,
+    research: true,
+    priority: 'evaluation',
+    deadlineMs: 5000,
+    run: () => {
+      order.push('outcome');
+      return Promise.resolve();
+    }
+  });
+  now = 500;
+  const backlog = Array.from({ length: 100 }, () =>
+    scheduler.schedule({
+      weight: 1,
+      priority: 'candidate',
+      run: () => {
+        order.push('candidate');
+        return Promise.resolve();
+      }
+    })
+  );
+  now = 1001;
+  release();
+  await Promise.all([first, outcome, ...backlog]);
+  assert.equal(order[0], 'outcome');
 });

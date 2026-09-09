@@ -540,7 +540,7 @@ void test('risk rejection retains market pass, actual inputs and thresholds rath
     assert.ok(marketScreen.conditions.every((c) => c.status === 'PASS'));
     assert.equal(f.quotes(), 0);
     assert.deepEqual(report.candidateDiagnostics.cohorts, [
-      { status: 'SELECTED', risk: 'entrapment_limit', tokens: 1 }
+      { status: 'SELECTED', risk: 'entrapment_limit', cohorts: 1, tokens: 1 }
     ]);
   } finally {
     await f.runtime.close();

@@ -47,3 +47,22 @@ void test('expired bursts are removed in bounded steps and cannot be mistaken fo
   r.restore(q.entries(), 200000);
   assert.equal(r.size, 0);
 });
+
+void test('new observations bypass a revisit backlog while revisits cannot starve and lane survives restart', () => {
+  const q = new TrialRotation(1000);
+  for (let i = 0; i < 500; i++) q.observe({ ...candidate(i), revisit: true });
+  for (let i = 500; i < 510; i++) q.observe(candidate(i, 10));
+  const restored = new TrialRotation(1000);
+  restored.restore(q.entries(), 10);
+  const admitted = Array.from({ length: 8 }, () => restored.take(10).candidate!);
+  assert.deepEqual(
+    admitted.map((c) => c.tokenAddress),
+    [500, 501, 502, 0, 503, 504, 505, 1].map((i) => candidate(i).tokenAddress)
+  );
+  const repeat = { ...candidate(2), revisit: true };
+  restored.observe({ ...repeat, seenAtMs: 20 });
+  assert.equal(
+    restored.entries().find((c) => c.tokenAddress === repeat.tokenAddress)?.revisit,
+    true
+  );
+});

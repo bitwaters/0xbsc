@@ -102,7 +102,7 @@ export function trialReport(db: SqliteDatabase, runId: string) {
   const candidateRows = db
     .prepare(
       `SELECT status,COALESCE(json_extract(risk_json,'$.reason'),'INFO_RISK_PASS') risk,
-      COUNT(*) tokens FROM research_trial_cohorts WHERE run_id=? GROUP BY status,risk`
+      COUNT(*) cohorts,COUNT(DISTINCT token) tokens FROM research_trial_cohorts WHERE run_id=? GROUP BY status,risk`
     )
     .all(runId);
   const candidateOutcomes = db
@@ -114,7 +114,7 @@ export function trialReport(db: SqliteDatabase, runId: string) {
           t.horizon_at_ms DESC) rn
       FROM research_trial_cohorts c JOIN research_outcome_tasks t ON t.baseline_id=c.baseline_id
       WHERE c.run_id=? AND t.result_json IS NOT NULL)
-    SELECT target,outcome,COUNT(*) tokens FROM ranked WHERE rn=1 GROUP BY target,outcome`
+    SELECT target,outcome,COUNT(*) cohorts FROM ranked WHERE rn=1 GROUP BY target,outcome`
     )
     .all(runId);
   return {

@@ -1,5 +1,6 @@
 import { dirname, join } from 'node:path';
 import type { MarketFact } from '../gmgn/facts.js';
+import { GmgnError } from '../gmgn/errors.js';
 import type { ResearchStorage } from './storage.js';
 import { ResearchArchive } from './archive.js';
 import { MeasurementStore } from './measurement-store.js';
@@ -251,12 +252,26 @@ export class OutcomeCollector {
           },
           incomplete ? this.now() + 1000 : undefined
         );
-      } catch {
+      } catch (error) {
+        const cause =
+          error instanceof GmgnError
+            ? `API_${error.kind}`
+            : error instanceof Error &&
+                [
+                  'EXECUTION_NOT_EVALUATED_RESOURCE',
+                  'RESEARCH_ADMISSION_DISABLED',
+                  'OUTCOME_POOL_CHANGED',
+                  'CAPTURE_STORAGE_EXCLUDED',
+                  'OUTCOME_FACT_IDENTITY'
+                ].includes(error.message)
+              ? error.message
+              : 'CAPTURE_ERROR';
         await this.store.finish(
           task.task_id,
           {
             outcome: 'CENSORED',
             reason: 'CAPTURE_UNAVAILABLE',
+            cause,
             observationAtMs: task.horizon_at_ms
           },
           this.now() + 1000
