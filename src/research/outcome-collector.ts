@@ -1,4 +1,5 @@
 import { dirname, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { MarketFact } from '../gmgn/facts.js';
 import { GmgnError } from '../gmgn/errors.js';
 import type { ResearchStorage } from './storage.js';
@@ -82,10 +83,27 @@ export class OutcomeCollector {
       ].includes(row.track)
     )
       return;
-    const next = observationCoordinates(row.available_at_ms).find(
+    const remaining = observationCoordinates(row.available_at_ms).filter(
       (at) => at > (row.last ?? row.available_at_ms)
     );
+    // Captures always read the full path from the immutable baseline. Catch up to
+    // the latest elapsed coordinate instead of starving live samples with missed polls.
+    const next = remaining.findLast((at) => at <= this.now()) ?? remaining[0];
     if (next === undefined) return;
+    const skipped = remaining.filter((at) => at < next).length;
+    if (skipped)
+      await this.research.storage.recordOperationTrace({
+        correlationId: randomUUID(),
+        stage: 'result',
+        occurredAtMs: this.now(),
+        metadata: {
+          baselineId,
+          reason: 'CATCHUP_FULL_PATH',
+          skippedObservationPoints: skipped,
+          previousAtMs: row.last ?? row.available_at_ms,
+          nextAtMs: next
+        }
+      });
     for (const target of p.targets) {
       const resolved = this.research.storage.db
         .prepare(
