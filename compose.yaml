@@ -4,6 +4,7 @@ services:
       context: .
     image: bsc-meme-signal-bot:local
     restart: unless-stopped
+    stop_grace_period: 90s
     read_only: true
     environment:
       # User-approved formal trial. The runtime itself persists its selected facts and results.

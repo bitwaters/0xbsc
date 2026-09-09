@@ -294,6 +294,74 @@ void test('falling prices and unsafe contracts cannot create trial signals; unsa
     }
   }
 });
+
+void test('an invalid Info ratio is data rejection, not a small inferred percentage', async () => {
+  const f = await fixture({ entrapment: 1.2 });
+  try {
+    await f.runtime.tick();
+    assert.equal(f.runtime.snapshot().counts.INFO_RISK_FIELD_UNAVAILABLE, 1);
+    assert.equal(f.quotes(), 0);
+    assert.ok(!f.calls.includes('/v1/token/security'));
+  } finally {
+    await f.runtime.close();
+    f.storage.close();
+  }
+});
+
+void test('a new run recovers confirmed cards from the previous run without replacing their entry or buying late quotes', async () => {
+  const f = await fixture();
+  let restarted: TrialRuntime | undefined;
+  try {
+    for (let i = 0; i < 3; i++) {
+      await f.runtime.tick();
+      if (i < 2) f.advance();
+    }
+    const signal = (await f.storage.pendingOutboxSignals(f.now(), true, 'opportunity-v1'))[0]!;
+    await f.storage.confirmTelegramDelivery({
+      signalId: signal.id,
+      chatId: '-100',
+      messageId: 1,
+      nowMs: f.now(),
+      outcomeCheckpointsMinutes: [],
+      narrativeOutcomeCheckpointsMinutes: []
+    });
+    const frozen = f.storage.db.prepare('SELECT decision_json FROM signals').get();
+    const quotes = f.quotes();
+    await f.runtime.close();
+    f.advance();
+    const newConfig = structuredClone(f.config);
+    newConfig.security.max_team_percent /= 2;
+    restarted = new TrialRuntime(f.storage, newConfig, 'cfg', f.api, f.clock);
+    assert.notEqual(restarted.runId, f.runtime.runId);
+    await restarted.start();
+    const baselines = f.storage.db
+      .prepare(
+        "SELECT run_id,track,status FROM evaluation_baselines WHERE track!='candidate_reference_v1'"
+      )
+      .all() as { run_id: string; track: string; status: string }[];
+    assert.equal(baselines.length, 3);
+    assert.ok(baselines.every((b) => b.run_id === f.runtime.runId));
+    assert.equal(baselines.find((b) => b.track === 'trial_card_reference_v1')?.status, 'VALID');
+    assert.equal(
+      baselines.find((b) => b.track === 'post_confirmation_quote_v1')?.status,
+      'MISSING'
+    );
+    assert.equal(f.quotes(), quotes);
+    assert.deepEqual(f.storage.db.prepare('SELECT decision_json FROM signals').get(), frozen);
+    assert.deepEqual(
+      f.storage.db
+        .prepare(
+          "SELECT COUNT(*) n FROM research_outcome_tasks t JOIN evaluation_baselines b ON b.baseline_id=t.baseline_id WHERE b.track='trial_card_reference_v1' AND t.status='PENDING'"
+        )
+        .get(),
+      { n: 4 }
+    );
+  } finally {
+    await restarted?.close();
+    await f.runtime.close();
+    f.storage.close();
+  }
+});
 void test('stale prepared card cancels without repricing; model hash mismatch refuses startup', async () => {
   const f = await fixture();
   try {

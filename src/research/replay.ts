@@ -22,7 +22,6 @@ export interface ReplayInput {
   events: NormalizedEvent[];
   legacyConfig: RuntimeConfig;
 }
-export type StageStatus = 'PASS' | 'FAIL' | 'UNKNOWN' | 'NOT_EVALUATED';
 /** Frozen legacy code, virtual clock, fact-backed API only. No transports are constructed. */
 export async function replay(input: ReplayInput) {
   if (

@@ -8,6 +8,7 @@ import { ResearchArchive } from './archive.js';
 import { randomUUID } from 'node:crypto';
 import { setImmediate as yieldToIO } from 'node:timers/promises';
 import { measureResearchInBackground } from './maintenance.js';
+import { setTimeout as delay } from 'node:timers/promises';
 
 /** Passive, bounded observer. It cannot call an API or feed the formal candidate queue. */
 export class ResearchRecorder {
@@ -186,5 +187,8 @@ export class ResearchRecorder {
     this.events.clear();
     if (this.maintenance) clearInterval(this.maintenance);
     this.maintenance = null;
+  }
+  async drain(): Promise<void> {
+    while (this.pending || this.maintenanceRunning) await delay(10);
   }
 }

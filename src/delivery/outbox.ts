@@ -2,6 +2,7 @@ import type { PendingOutboxSignal, Storage } from '../storage/database.js';
 import type { InlineKeyboardMarkup, InputRichMessage, TelegramClient } from './telegram.js';
 import { TelegramError } from './telegram.js';
 import type { PublicationGuard } from './publication-guard.js';
+import { TaskGroup } from '../runtime/task-group.js';
 
 export interface DeliveryPayload {
   text?: string;
@@ -10,6 +11,11 @@ export interface DeliveryPayload {
 }
 
 export class OutboxDeliveryService {
+  private readonly followups = new TaskGroup();
+
+  drain(): Promise<void> {
+    return this.followups.drain();
+  }
   constructor(
     private readonly options: {
       storage: Storage;
@@ -107,10 +113,10 @@ export class OutboxDeliveryService {
       );
       return 'failed';
     }
-    const payload = this.options.render(preparedSignal);
     let transportStarted = false;
     let transportSucceeded = false;
     try {
+      const payload = this.options.render(preparedSignal);
       const requestAtMs = this.options.now?.() ?? Date.now();
       if ((payload.text === undefined) === (payload.richMessage === undefined))
         throw new TelegramError(
@@ -161,18 +167,23 @@ export class OutboxDeliveryService {
         await this.options.onTrace?.(preparedSignal, 'telegram_confirmation', confirmedAtMs);
         const onConfirmed = this.options.onConfirmed;
         if (onConfirmed)
-          void onConfirmed(preparedSignal, confirmedAtMs).catch((error: unknown) =>
-            this.options.onConfirmedError?.(preparedSignal, error)
-          );
+          void this.followups
+            .track(
+              Promise.resolve()
+                .then(() => onConfirmed(preparedSignal, confirmedAtMs))
+                .catch((error: unknown) => this.options.onConfirmedError?.(preparedSignal, error))
+            )
+            .catch(() => undefined);
         return 'sent';
       }
       return 'skipped';
     } catch (error) {
       const failedAtMs = this.options.now?.() ?? Date.now();
-      const classified =
-        transportSucceeded || (transportStarted && !(error instanceof TelegramError))
-          ? 'unknown'
-          : classifyDeliveryError(error);
+      const classified = transportSucceeded
+        ? 'unknown'
+        : transportStarted
+          ? classifyDeliveryError(error)
+          : 'failed';
       if (classified === 'rate_limit') {
         if (owner) await this.options.publicationGuard!.knownUnsent(signal.id);
         const retryAfterMs =
@@ -210,8 +221,10 @@ function classifyDeliveryError(error: unknown): 'unknown' | 'failed' | 'rate_lim
   if (!(error instanceof TelegramError)) return 'unknown';
   if (error.kind === 'rate_limit') return 'rate_limit';
   if (error.kind === 'http' && error.status === 429) return 'rate_limit';
-  if (error.kind === 'network' || error.kind === 'timeout') return 'unknown';
-  if (error.kind === 'http' && (error.status === undefined || error.status >= 500))
+  // A malformed response is not proof the send failed. Preserve the reservation.
+  if (error.kind === 'network' || error.kind === 'timeout' || error.kind === 'schema')
+    return 'unknown';
+  if ((error.kind === 'http' && error.status === undefined) || (error.status ?? 0) >= 500)
     return 'unknown';
   return 'failed';
 }

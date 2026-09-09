@@ -191,11 +191,6 @@ function ageFrom(value: unknown, nowMs: number): number | null {
   return milliseconds <= nowMs ? nowMs - milliseconds : null;
 }
 
-export function currentInfoSwaps(infoResponse: unknown): number | null {
-  const info = dataRecord(infoResponse);
-  return finite(record(info.price)?.swaps_5m);
-}
-
 export function rollingRevivalActivity(
   infoResponse: unknown,
   history: CompletedCandle[],

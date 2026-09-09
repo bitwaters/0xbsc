@@ -2,7 +2,7 @@ import { assessHolders } from './holders.js';
 import type { RuntimeConfig } from '../config/types.js';
 import type { CandidateGmgnApi } from '../gmgn/api.js';
 import { assessCoordinatedExit, type TraderSnapshot } from './coordinated-exit.js';
-import { normalizeRate } from './normalize.js';
+import { normalizeRatio } from './normalize.js';
 import { evaluateLazyDeepVeto, type LazyDeepSafetyData } from './deep-veto.js';
 
 type JsonRecord = Record<string, unknown>;
@@ -23,7 +23,7 @@ function rows(value: unknown): JsonRecord[] | null {
 }
 function rate(value: unknown, field: string): number | null {
   try {
-    return normalizeRate(value, field).toNumber();
+    return normalizeRatio(value, field).toNumber();
   } catch {
     return null;
   }

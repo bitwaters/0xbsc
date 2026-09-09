@@ -2,6 +2,33 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { adaptGmgnSafety } from '../../src/safety/gmgn-adapter.js';
 
+void test('out-of-contract GMGN ratios cannot be reinterpreted as small percentages', () => {
+  for (const invalid of [1.01, '1.2', 20, -0.1, 'NaN']) {
+    const adapted = adaptGmgnSafety({
+      info: {
+        stat: {
+          dev_team_hold_rate: invalid,
+          top_entrapment_trader_percentage: invalid,
+          top_bundler_trader_percentage: invalid,
+          top70_sniper_hold_rate: invalid
+        }
+      },
+      security: { buy_tax: invalid, sell_tax: invalid, top_10_holder_rate: invalid },
+      pool: {}
+    });
+    assert.equal(adapted.deep.info.buyTax, undefined);
+    assert.equal(adapted.deep.info.sellTax, undefined);
+    for (const field of [
+      'teamPercent',
+      'entrapmentPercent',
+      'bundlerPercent',
+      'sniperPercent',
+      'top10Percent'
+    ] as const)
+      assert.equal(adapted.deep.security[field], undefined);
+  }
+});
+
 void test('maps audited GMGN security fields and keeps unknown values fail-closed', () => {
   const adapted = adaptGmgnSafety({
     info: {

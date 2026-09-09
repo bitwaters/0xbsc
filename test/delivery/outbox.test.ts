@@ -662,3 +662,98 @@ void test('successful Telegram response followed by database failure preserves U
     true
   );
 });
+
+void test('malformed send responses and API server errors preserve the uncertain publication lock', async () => {
+  for (const response of [
+    { ok: true, result: { message_id: 99 } },
+    { unexpected: 'proxy response' },
+    { ok: false, error_code: 500, description: 'Internal Server Error' }
+  ]) {
+    await withOutbox(
+      () => Promise.resolve(response),
+      async ({ storage, service, sent }) => {
+        await service.recoverAndDeliver();
+        assert.deepEqual(storage.db.prepare('SELECT delivery_state FROM signals').get(), {
+          delivery_state: 'DELIVERY_UNKNOWN'
+        });
+        assert.deepEqual(storage.db.prepare('SELECT state FROM publication_token_locks').get(), {
+          state: 'UNKNOWN'
+        });
+        await service.recoverAndDeliver();
+        assert.equal(sent(), 1);
+      },
+      undefined,
+      true
+    );
+  }
+});
+
+void test('a local rendering failure terminates the outbox item without starting transport', async () => {
+  await withOutbox(
+    () => Promise.reject(new Error('unexpected transport')),
+    async ({ storage }) => {
+      let calls = 0;
+      const service = new OutboxDeliveryService({
+        storage,
+        telegram: new TelegramClient({ botToken: 'fake' }),
+        chatId: '-100',
+        render: () => {
+          calls++;
+          throw new Error('invalid stored presentation');
+        },
+        revalidateBeforeUnknownRetry: () => Promise.resolve(false),
+        now: () => 1000
+      });
+      await service.recoverAndDeliver();
+      await service.recoverAndDeliver();
+      assert.equal(calls, 1);
+      assert.deepEqual(storage.db.prepare('SELECT delivery_state FROM signals').get(), {
+        delivery_state: 'SEND_FAILED'
+      });
+      assert.deepEqual(storage.db.prepare('SELECT COUNT(*) n FROM publication_token_locks').get(), {
+        n: 0
+      });
+    }
+  );
+});
+
+void test('shutdown waits for confirmation persistence without holding up the next delivery', async () => {
+  await withOutbox(
+    () => Promise.resolve({}),
+    async ({ storage }) => {
+      const gate = Promise.withResolvers<void>();
+      let captured = false;
+      const service = new OutboxDeliveryService({
+        storage,
+        chatId: '-100',
+        render: () => ({ text: 'fixture' }),
+        telegram: new TelegramClient({
+          botToken: 'fake',
+          transport: () =>
+            Promise.resolve({
+              status: 200,
+              body: { ok: true, result: { message_id: 1, chat: { id: '-100' } } }
+            })
+        }),
+        revalidateBeforeUnknownRetry: () => Promise.resolve(false),
+        onConfirmed: async () => {
+          await gate.promise;
+          await storage.write(() => {
+            captured = true;
+          });
+        }
+      });
+      await service.recoverAndDeliver();
+      assert.equal(captured, false);
+      let drained = false;
+      const closing = service.drain().then(() => {
+        drained = true;
+      });
+      await Promise.resolve();
+      assert.equal(drained, false);
+      gate.resolve();
+      await closing;
+      assert.equal(captured, true);
+    }
+  );
+});

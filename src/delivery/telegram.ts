@@ -202,7 +202,8 @@ export class TelegramClient {
         );
       throw new TelegramError(
         'api',
-        redactTelegram(`Telegram API rejected ${method}: ${description}`, this.options.botToken)
+        redactTelegram(`Telegram API rejected ${method}: ${description}`, this.options.botToken),
+        typeof response.body.error_code === 'number' ? response.body.error_code : undefined
       );
     }
     if (!('result' in response.body))

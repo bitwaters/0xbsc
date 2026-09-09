@@ -1,9 +1,10 @@
 import type { RuntimeConfig } from '../config/types.js';
 import type { MarketFact } from '../gmgn/facts.js';
 import { adaptGmgnSafety } from '../safety/gmgn-adapter.js';
-import { evaluateDeepSafety, type DeepSafetyThresholds } from '../safety/deep-gate.js';
+import { evaluateDeepSafety } from '../safety/deep-gate.js';
+import { safetyThresholds } from '../safety/thresholds.js';
 import { evaluatePermissionAndLpSafety } from '../safety/permission-gate.js';
-import { normalizeRate } from '../safety/normalize.js';
+import { normalizeRatio } from '../safety/normalize.js';
 
 export interface RiskFinding {
   kind: 'risk' | 'data';
@@ -15,16 +16,6 @@ export interface RiskFinding {
   limit?: number;
   endpoint?: string;
 }
-export const riskThresholds = (c: RuntimeConfig): DeepSafetyThresholds => ({
-  maxBuyTax: c.security.max_buy_tax,
-  maxSellTax: c.security.max_sell_tax,
-  maxTop10Percent: c.security.max_top10_percent,
-  maxTeamPercent: c.security.max_team_percent,
-  maxEntrapmentPercent: c.security.max_entrapment_percent,
-  maxBundlerPercent: c.security.max_bundler_percent,
-  maxSniperPercent: c.security.max_sniper_percent,
-  fatalFlags: c.security.fatal_flags
-});
 export function creatorAddress(info: MarketFact): string | null {
   const p = info.payload;
   const values = [
@@ -90,7 +81,7 @@ export function screenInfo(
   const base = { factIds: [info.factId], expiresAtMs: info.requestedAtMs + ttl };
   for (const [field, label, limit] of limits) {
     try {
-      const value = normalizeRate(stat[field], label);
+      const value = normalizeRatio(stat[field], label);
       if (value.gt(limit))
         return {
           ...base,
@@ -128,7 +119,7 @@ export function screenBasic(
   const a = adaptGmgnSafety({ info: info.payload, security: security.payload, pool: pool.payload });
   const deep = evaluateDeepSafety(
     a.deep,
-    riskThresholds(config),
+    safetyThresholds(config),
     new Set(config.security.fatal_flags)
   );
   const base = {

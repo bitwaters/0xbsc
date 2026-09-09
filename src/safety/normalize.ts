@@ -22,6 +22,14 @@ export function normalizeRate(value: unknown, field: string): Decimal {
   return normalized;
 }
 
+/** GMGN ratio fields have an explicit 0..1 contract; never guess a percentage unit. */
+export function normalizeRatio(value: unknown, field: string): Decimal {
+  const parsed = decimal(value, field);
+  if (parsed.lt(0) || parsed.gt(1))
+    throw new NormalizationError(`${field} must be a ratio from 0 to 1`);
+  return parsed;
+}
+
 export function normalizeUsd(value: unknown, field: string): Decimal {
   const parsed = decimal(value, field);
   if (parsed.isNegative()) throw new NormalizationError(`${field} cannot be negative`);

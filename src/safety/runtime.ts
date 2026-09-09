@@ -3,6 +3,7 @@ import type { NormalizedEvent } from '../discovery/events.js';
 import { KeyedSerialExecutor } from '../discovery/events.js';
 import type { CandidateGmgnApi } from '../gmgn/api.js';
 import type { Priority } from '../gmgn/scheduler.js';
+import { safetyThresholds } from './thresholds.js';
 import { adaptGmgnSafety } from './gmgn-adapter.js';
 import { assessCandidateSafety, type CandidateSafetyAssessment } from './candidate-admission.js';
 import { adaptDiscoverySafetyFields, preFilter, type CachedSafety } from './pre-filter.js';
@@ -35,7 +36,7 @@ export class SafetyRuntime {
     const cache = this.#cache.get(event.tokenAddress.toLowerCase());
     const prechecked = preFilter(
       adaptDiscoverySafetyFields(event.payload),
-      this.thresholds.preFilter,
+      safetyThresholds(this.config),
       this.now(),
       cache
     );
@@ -80,7 +81,7 @@ export class SafetyRuntime {
       const nowMs = this.now();
       const cache = options.force ? undefined : this.#cache.get(event.tokenAddress.toLowerCase());
       const discovery = adaptDiscoverySafetyFields(event.payload);
-      const prechecked = preFilter(discovery, this.thresholds.preFilter, nowMs, cache);
+      const prechecked = preFilter(discovery, safetyThresholds(this.config), nowMs, cache);
       if (!prechecked.allowed)
         return {
           allowed: false,
@@ -108,8 +109,8 @@ export class SafetyRuntime {
       const assessment = await assessCandidateSafety({
         discovery,
         nowMs,
-        preFilterThresholds: this.thresholds.preFilter,
-        deepThresholds: this.thresholds.deep,
+        preFilterThresholds: safetyThresholds(this.config),
+        deepThresholds: safetyThresholds(this.config),
         deepFetchers: {
           info: () => Promise.resolve(adapted.deep.info),
           security: () => Promise.resolve(adapted.deep.security),
@@ -131,44 +132,5 @@ export class SafetyRuntime {
         ...(assessment.allowed ? { info, security, pool, assessedAtMs } : {})
       };
     });
-  }
-
-  private get thresholds(): {
-    preFilter: {
-      maxBuyTax: number;
-      maxSellTax: number;
-      maxTop10Percent: number;
-      maxTeamPercent: number;
-    };
-    deep: {
-      maxBuyTax: number;
-      maxSellTax: number;
-      maxTop10Percent: number;
-      maxTeamPercent: number;
-      maxEntrapmentPercent: number;
-      maxBundlerPercent: number;
-      maxSniperPercent: number;
-      fatalFlags: string[];
-    };
-  } {
-    const security = this.config.security;
-    return {
-      preFilter: {
-        maxBuyTax: security.max_buy_tax,
-        maxSellTax: security.max_sell_tax,
-        maxTop10Percent: security.max_top10_percent,
-        maxTeamPercent: security.max_team_percent
-      },
-      deep: {
-        maxBuyTax: security.max_buy_tax,
-        maxSellTax: security.max_sell_tax,
-        maxTop10Percent: security.max_top10_percent,
-        maxTeamPercent: security.max_team_percent,
-        maxEntrapmentPercent: security.max_entrapment_percent,
-        maxBundlerPercent: security.max_bundler_percent,
-        maxSniperPercent: security.max_sniper_percent,
-        fatalFlags: security.fatal_flags
-      }
-    };
   }
 }

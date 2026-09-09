@@ -14,6 +14,121 @@ const input = {
   preparationComplete: true,
   confirmation: { kind: 'SIMULATED' as const, preparedAtMs: epoch }
 };
+
+void test('collector restart resumes an old baseline after a completed cadence without changing its coordinate', async () => {
+  const { storage, research, fact } = await captureFixture();
+  try {
+    const store = new MeasurementStore(storage);
+    const id = await store.begin({
+      runId: 'run',
+      opportunityId: 'op',
+      track: 'post_confirmation_market_v1',
+      confirmationAtMs: epoch,
+      confirmationKind: 'ACTUAL'
+    });
+    await store.settle(id, {
+      status: 'VALID',
+      reason: 'fixture',
+      price: '1',
+      availableAtMs: epoch,
+      sourceAtMs: epoch,
+      factId: fact.factId
+    });
+    for (const target of [1.3, 1.5, 2, 3]) {
+      const taskId = await store.schedule(id, target, epoch + 30000, epoch + 31000);
+      await store.claim(taskId, epoch + 31000);
+      await store.finish(taskId, { outcome: 'CENSORED', reason: 'HORIZON_PENDING' });
+    }
+    const original = storage.db.prepare('SELECT * FROM evaluation_baselines').get();
+    const collector = new OutcomeCollector(
+      research,
+      () => epoch + 120000,
+      () => Promise.reject(new Error('recovery must not call the API')),
+      undefined,
+      'published'
+    );
+    await collector.recover();
+    await collector.recover();
+    assert.deepEqual(
+      storage.db
+        .prepare(
+          "SELECT COUNT(*) n,MIN(horizon_at_ms) at FROM research_outcome_tasks WHERE status='PENDING'"
+        )
+        .get(),
+      { n: 4, at: epoch + 120000 }
+    );
+    assert.deepEqual(storage.db.prepare('SELECT * FROM evaluation_baselines').get(), original);
+  } finally {
+    storage.close();
+  }
+});
+
+void test('a later Kline gap cannot erase a proven first touch, but an earlier gap prevents it', async () => {
+  for (const gapBeforeTouch of [false, true]) {
+    const { storage, research, fact } = await captureFixture();
+    try {
+      const store = new MeasurementStore(storage);
+      const id = await store.begin({
+        runId: 'run',
+        opportunityId: 'op',
+        track: 'post_confirmation_market_v1',
+        confirmationAtMs: epoch,
+        confirmationKind: 'ACTUAL'
+      });
+      await store.settle(id, {
+        status: 'VALID',
+        reason: 'fixture',
+        price: '1',
+        availableAtMs: epoch,
+        sourceAtMs: epoch,
+        factId: fact.factId
+      });
+      let attempts = 0;
+      const collector = new OutcomeCollector(
+        research,
+        () => epoch + 91000,
+        (address, poolRevision, from, to) =>
+          Promise.resolve(
+            createMarketFact({
+              poolRevision,
+              request: {
+                method: 'GET',
+                path: '/v1/market/token_kline',
+                query: { address, from, to, resolution: '30s' }
+              },
+              response: {
+                data: {
+                  list: [0, 60000].map((offset) => ({
+                    time: epoch + offset,
+                    open: '1',
+                    low: '1',
+                    high: (gapBeforeTouch ? offset > 0 : offset === 0) ? '1.4' : '1.1',
+                    close: '1',
+                    volume: '10'
+                  }))
+                }
+              },
+              attemptId: 'gap-' + ++attempts,
+              purpose: 'outcome',
+              queuedAtMs: epoch + 90000,
+              requestedAtMs: epoch + 90000,
+              receivedAtMs: epoch + 90100
+            })
+          )
+      );
+      await store.schedule(id, 1.3, epoch + 90000, epoch + 91000);
+      await collector.tick();
+      const row = storage.db
+        .prepare('SELECT result_json FROM research_outcome_tasks WHERE result_json IS NOT NULL')
+        .get() as { result_json: string };
+      const result = JSON.parse(row.result_json) as { outcome: string; reason: string };
+      assert.equal(result.outcome, gapBeforeTouch ? 'UNKNOWN' : 'TP');
+      assert.equal(result.reason, gapBeforeTouch ? 'PATH_GAP_OR_OVERLAP' : 'TARGET_FIRST');
+    } finally {
+      storage.close();
+    }
+  }
+});
 void test('sampler persists pending before physical calls and terminal baselines never request again', async () => {
   const { storage, research, fact } = await captureFixture();
   let now = epoch,

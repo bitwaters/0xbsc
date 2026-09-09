@@ -1,4 +1,4 @@
-import { normalizeRate } from './normalize.js';
+import { normalizeRatio } from './normalize.js';
 type RecordValue = Record<string, unknown>;
 const record = (x: unknown): RecordValue | null =>
   x !== null && typeof x === 'object' && !Array.isArray(x) ? (x as RecordValue) : null;
@@ -61,7 +61,7 @@ export function assessHolders(
     owners.add(owner);
     let share: number;
     try {
-      share = normalizeRate(row.amount_percentage, 'holder.amount_percentage').toNumber();
+      share = normalizeRatio(row.amount_percentage, 'holder.amount_percentage').toNumber();
     } catch {
       diagnostics.invalidRow = i;
       return unknown('holders_share_invalid');

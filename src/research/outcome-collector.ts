@@ -53,6 +53,25 @@ export class OutcomeCollector {
       join(dirname(research.storage.db.name), 'research-archives')
     );
   }
+  /** Recovery belongs to the immutable baseline, not the currently deployed model/run. */
+  async recover() {
+    const baselines = this.research.storage.db
+      .prepare(
+        `
+      SELECT baseline_id FROM evaluation_baselines b
+      WHERE status='VALID' AND available_at_ms>=? AND available_at_ms<=?
+      AND track IN ('post_confirmation_market_v1','decision_market_replay_v1',
+        'trial_card_reference_v1','candidate_reference_v1')
+      AND (?='all' OR (?='candidates' AND b.track='candidate_reference_v1')
+        OR (?='published' AND b.track!='candidate_reference_v1'))
+      ORDER BY available_at_ms,baseline_id
+    `
+      )
+      .all(this.now() - p.horizonMs - 7200000, this.now(), this.scope, this.scope, this.scope) as {
+      baseline_id: string;
+    }[];
+    for (const row of baselines) await this.scheduleNext(row.baseline_id);
+  }
   /** Enqueue only the next cadence, rather than occupying the bounded queue with an entire day. */
   async scheduleNext(baselineId: string) {
     if (
@@ -227,7 +246,9 @@ export class OutcomeCollector {
           facts.push(fact);
         }
         const candles: PathCandle[] = facts
-          .filter((f) => !f.qualityFlags.length)
+          // Missing intervals are judged in chronological order by firstTouch.
+          // A later gap cannot invalidate an already proven earlier touch.
+          .filter((f) => f.qualityFlags.every((flag) => flag === 'CANDLE_GAP'))
           .flatMap((f) => {
             const rows = Array.isArray(f.payload.list)
               ? (f.payload.list as Record<string, unknown>[])

@@ -434,8 +434,18 @@ void test('continues discovery polling while downstream analysis is running', as
     clock.value = 10;
     assert.equal(await runtime.tick('signal:high_frequency'), 0);
     assert.equal(signalCalls, 2);
+    runtime.stop();
+    let drained = false;
+    const closing = runtime.drain().then(() => {
+      drained = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(drained, false);
+    assert.equal(await runtime.tick('signal:high_frequency'), 0);
+    assert.equal(signalCalls, 2);
     release();
-    await runtime.work.drain();
+    await closing;
+    assert.equal(drained, true);
     assert.equal(await first, 1);
   } finally {
     storage.close();

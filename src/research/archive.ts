@@ -12,13 +12,20 @@ export class ResearchArchive {
   ) {}
   pin(runId: string, factIds: readonly string[], maxBytes: number): Promise<void> {
     return this.research.storage.transaction(() => {
-      if (!this.research.reserveReferenceBytes(factIds.length, maxBytes)) {
+      const missing = [...new Set(factIds)].filter(
+        (id) =>
+          !this.research.storage.db
+            .prepare('SELECT 1 FROM research_fact_references WHERE run_id=? AND fact_id=?')
+            .get(runId, id)
+      );
+      if (!missing.length) return;
+      if (!this.research.reserveReferenceBytes(missing.length, maxBytes)) {
         this.research.storage.db
           .prepare("UPDATE research_runs SET status='INCONCLUSIVE' WHERE run_id=?")
           .run(runId);
         return;
       }
-      for (const id of factIds)
+      for (const id of missing)
         this.research.storage.db
           .prepare('INSERT OR IGNORE INTO research_fact_references(run_id,fact_id) VALUES (?,?)')
           .run(runId, id);

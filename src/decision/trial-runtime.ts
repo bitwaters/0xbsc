@@ -93,21 +93,7 @@ export class TrialRuntime {
     this.outcomes = new OutcomeCollector(
       this.research,
       () => clock.now(),
-      async (token, pool, fromMs, toMs) => {
-        const fact = responseFact(
-          await withGmgnContext(
-            { priority: 'evaluation', purpose: 'outcome', deadlineMs: clock.now() + 5000 },
-            async () => {
-              const info = responseFact(await api.token('/v1/token/info', token));
-              if (!info || info.poolRevision !== pool) throw new Error('OUTCOME_POOL_CHANGED');
-              await this.saveFact(info);
-              return api.kline(token, '30s', { fromMs, toMs });
-            }
-          )
-        );
-        if (!fact || fact.poolRevision !== pool) throw new Error('OUTCOME_POOL_CHANGED');
-        return fact;
-      },
+      (token, pool, fromMs, toMs) => this.captureOutcome(token, pool, fromMs, toMs, false),
       async (baselineId, target, atMs) => {
         const paired = this.storage.db
           .prepare(
@@ -123,23 +109,7 @@ export class TrialRuntime {
     this.candidateOutcomes = new OutcomeCollector(
       this.research,
       () => clock.now(),
-      (token, pool, fromMs, toMs) =>
-        withGmgnContext(
-          {
-            research: true,
-            priority: 'evaluation',
-            purpose: 'outcome',
-            deadlineMs: clock.now() + 5000
-          },
-          async () => {
-            const info = responseFact(await api.token('/v1/token/info', token));
-            if (!info || info.poolRevision !== pool) throw new Error('OUTCOME_POOL_CHANGED');
-            await this.saveFact(info);
-            const fact = responseFact(await api.kline(token, '30s', { fromMs, toMs }));
-            if (!fact || fact.poolRevision !== pool) throw new Error('OUTCOME_POOL_CHANGED');
-            return fact;
-          }
-        ),
+      (token, pool, fromMs, toMs) => this.captureOutcome(token, pool, fromMs, toMs, true),
       undefined,
       'candidates'
     );
@@ -166,6 +136,25 @@ export class TrialRuntime {
             return sell;
           }
         );
+      }
+    );
+  }
+  private captureOutcome(
+    token: string,
+    pool: string,
+    fromMs: number,
+    toMs: number,
+    research: boolean
+  ) {
+    return withGmgnContext(
+      { research, priority: 'evaluation', purpose: 'outcome', deadlineMs: this.clock.now() + 5000 },
+      async () => {
+        const info = responseFact(await this.api.token('/v1/token/info', token));
+        if (!info || info.poolRevision !== pool) throw new Error('OUTCOME_POOL_CHANGED');
+        await this.saveFact(info);
+        const fact = responseFact(await this.api.kline(token, '30s', { fromMs, toMs }));
+        if (!fact || fact.poolRevision !== pool) throw new Error('OUTCOME_POOL_CHANGED');
+        return fact;
       }
     );
   }
@@ -220,20 +209,15 @@ export class TrialRuntime {
       });
     await this.calibrate();
     await this.measurements.recover(this.clock.now());
-    for (const row of this.storage.db
-      .prepare(
-        `SELECT baseline_id FROM evaluation_baselines
-      WHERE track='candidate_reference_v1' AND status='VALID' AND available_at_ms>?`
-      )
-      .all(this.clock.now() - 86400000) as { baseline_id: string }[])
-      await this.candidateOutcomes.scheduleNext(row.baseline_id);
+    await this.outcomes.recover();
+    await this.candidateOutcomes.recover();
     await this.exits.recover();
     // Confirmed sends whose follow-up was interrupted retain MISSING, never a later lower entry.
     const sent = this.storage.db
       .prepare(
-        "SELECT id,episode_id AS episodeId,decision_json AS decision,quote_snapshot_json AS quoteSnapshot,telegram_confirmed_at_ms AS atMs FROM signals WHERE decision_format='opportunity-v1' AND delivery_state='SENT' AND json_extract(decision_json,'$.runId')=?"
+        "SELECT id,episode_id AS episodeId,decision_json AS decision,quote_snapshot_json AS quoteSnapshot,telegram_confirmed_at_ms AS atMs FROM signals WHERE decision_format='opportunity-v1' AND delivery_state='SENT' AND telegram_confirmed_at_ms>=?"
       )
-      .all(this.runId) as {
+      .all(this.clock.now() - 93600000) as {
       id: string;
       episodeId: string;
       decision: string;
@@ -861,9 +845,8 @@ export class TrialRuntime {
       throw new Error('ACTUAL_CONFIRMATION_NOT_PERSISTED');
     const d = readTrialDecision(signal.decision),
       opportunityId = d.context.opportunityId;
-    if (d.modelHash !== this.model.hash || d.runId !== this.runId) return;
     const common = {
-      runId: this.runId,
+      runId: d.runId,
       opportunityId,
       confirmationAtMs: confirmedAtMs,
       confirmationKind: 'ACTUAL' as const
@@ -897,6 +880,7 @@ export class TrialRuntime {
     });
     if (await this.measurements.isPending(quoteId)) {
       try {
+        if (d.runId !== this.runId) throw new Error('BASELINE_RUN_CHANGED');
         if (this.clock.now() >= confirmedAtMs + 5000) throw new Error('BASELINE_DEADLINE_EXPIRED');
         if (!(await this.measurements.claimBaselineAttempt(quoteId, this.clock.now())))
           throw new Error('BASELINE_ATTEMPT_EXHAUSTED');
@@ -921,9 +905,9 @@ export class TrialRuntime {
           this.storage.db
             .prepare('INSERT OR IGNORE INTO research_registrations VALUES (?,?,?,?,?,?)')
             .run(
-              hashValue([this.runId, opportunityId, 'baseline_quotes']),
+              hashValue([d.runId, opportunityId, 'baseline_quotes']),
               'baseline_quotes',
-              this.runId,
+              d.runId,
               this.clock.now(),
               hashValue([buy]),
               JSON.stringify([buy])

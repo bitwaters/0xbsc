@@ -18,6 +18,7 @@ void test('distinguishes missing or malformed evidence from verified holder conc
   assert.equal(assess({}).reason, 'holders_list_invalid');
   assert.equal(assess([{ ...wallet, address: null }]).reason, 'holders_address_missing');
   assert.equal(assess([{ ...wallet, amount_percentage: null }]).reason, 'holders_share_invalid');
+  assert.equal(assess([{ ...wallet, amount_percentage: 1.2 }]).reason, 'holders_share_invalid');
   assert.equal(
     assess([{ ...wallet, is_suspicious: 'false' }]).reason,
     'holders_suspicious_flag_missing'

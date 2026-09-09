@@ -145,8 +145,6 @@ export function decidePositions(decisions: TierDecision[]): {
   if (!minimum) throw new Error('10U decision is required');
   if (decisions.some((decision) => decision.routeFailure))
     return { accepted: false, maxSafePosition: null, temporaryCostFailure: false };
-  if (minimum.routeFailure)
-    return { accepted: false, maxSafePosition: null, temporaryCostFailure: false };
   if (!minimum.passes)
     return { accepted: false, maxSafePosition: null, temporaryCostFailure: true };
   return {

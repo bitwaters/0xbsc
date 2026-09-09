@@ -147,6 +147,23 @@ void test('archive resolves immutable fact IDs after online payload pruning and 
     }
   }));
 
+void test('pinning an existing fact is idempotent even when the storage budget is full', async () =>
+  fixture(async (s, r) => {
+    const { ResearchArchive } = await import('../../src/research/archive.js');
+    const f = makeFact();
+    await r.recordFact(f, 'run', 2 ** 30);
+    const archive = new ResearchArchive(r, 'unused');
+    r.calibrateQuota(1000, 0);
+    await archive.pin('run', [f.factId, f.factId], 5096);
+    assert.equal(r.quotaBytes(), 5096);
+    await archive.pin('run', [f.factId], 5096);
+    assert.equal(r.quotaBytes(), 5096);
+    assert.deepEqual(s.db.prepare('SELECT status FROM research_runs').get(), { status: 'ACTIVE' });
+    assert.deepEqual(s.db.prepare('SELECT COUNT(*) n FROM research_fact_references').get(), {
+      n: 1
+    });
+  }));
+
 void test('opportunity persistence is compare-and-swap and retains the original anchor after restart', async () =>
   fixture(async (_s, r) => {
     const { watchingState } = await import('../../src/decision/opportunity.js');

@@ -39,8 +39,8 @@ function api(overrides: Partial<Record<'holders' | 'traders' | 'createdTokens', 
         overrides.holders ?? {
           data: {
             list: [
-              { address: '0xpool', amount_percentage: 80, is_suspicious: false },
-              { address: '0xuser', amount_percentage: 20, is_suspicious: false }
+              { address: '0xpool', amount_percentage: 0.8, is_suspicious: false },
+              { address: '0xuser', amount_percentage: 0.2, is_suspicious: false }
             ]
           }
         }
@@ -79,8 +79,8 @@ void test('rejects concentrated holders, direct creator holdings, coordinated re
         holders: {
           data: {
             list: [
-              { address: '0xpool', amount_percentage: 70, is_suspicious: false },
-              { address: '0xwhale', amount_percentage: 21, is_suspicious: false }
+              { address: '0xpool', amount_percentage: 0.7, is_suspicious: false },
+              { address: '0xwhale', amount_percentage: 0.21, is_suspicious: false }
             ]
           }
         }
@@ -123,7 +123,7 @@ void test('rejects concentrated holders, direct creator holdings, coordinated re
     ],
     [
       'drift',
-      { holders: { data: { list: [{ address: '0xpool', amount_percentage: 80 }] } } },
+      { holders: { data: { list: [{ address: '0xpool', amount_percentage: 0.8 }] } } },
       'holders_wallets_missing'
     ]
   ];

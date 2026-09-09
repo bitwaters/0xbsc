@@ -7,6 +7,8 @@ import { BoundedWorkQueue } from './work-queue.js';
 import { adaptGmgnResponse } from './adapters.js';
 import { SnapshotDeduplicator, type DiscoverySource, type NormalizedEvent } from './events.js';
 import { DiscoveryPollingService } from './plan.js';
+import { safetyThresholds } from '../safety/thresholds.js';
+import { TaskGroup } from '../runtime/task-group.js';
 
 const sourceForPoll = (name: string): DiscoverySource | null => {
   if (name.startsWith('signal:')) return 'signal';
@@ -24,6 +26,8 @@ export class DiscoveryRuntime {
   #deduplicator = new SnapshotDeduplicator();
   #timer: ReturnType<typeof setInterval> | null = null;
   #runningTicks = new Set<string>();
+  #stopped = false;
+  private readonly tasks = new TaskGroup();
 
   constructor(
     private readonly input: {
@@ -44,7 +48,7 @@ export class DiscoveryRuntime {
       input.config.optimization?.queue_capacity ?? 200,
       input.config.optimization?.queue_concurrency ?? 4,
       async (event) => {
-        if (event.expiresAtMs > input.clock.now()) await input.onEvent?.(event);
+        if (!this.#stopped && event.expiresAtMs > input.clock.now()) await input.onEvent?.(event);
       },
       (event, error) => input.onEventError?.(event, error)
     );
@@ -60,20 +64,21 @@ export class DiscoveryRuntime {
     this.#deduplicator = new SnapshotDeduplicator((await this.input.storage.recover()).snapshots);
   }
 
-  async tick(name: string): Promise<number> {
-    if (this.#runningTicks.has(name)) return 0;
+  tick(name: string): Promise<number> {
+    if (this.#stopped || this.#runningTicks.has(name)) return Promise.resolve(0);
     this.#runningTicks.add(name);
-    try {
-      return await this.runTick(name);
-    } finally {
-      this.#runningTicks.delete(name);
-    }
+    return this.tasks.track(
+      this.runTick(name).finally(() => {
+        this.#runningTicks.delete(name);
+      })
+    );
   }
 
   private async runTick(name: string): Promise<number> {
     const outcome = await withGmgnContext({ purpose: 'shared_collection' }, () =>
       this.polling.tick(name)
     );
+    if (this.#stopped) return 0;
     const source = sourceForPoll(name);
     if (outcome.status !== 'success' || source === null || outcome.value === undefined) return 0;
     if (this.input.onUniverseObserved) {
@@ -106,18 +111,14 @@ export class DiscoveryRuntime {
       rankChangeStep: this.input.config.polling.rank_change_step,
       ...(this.input.config.security
         ? {
-            snapshotSafetyThresholds: {
-              maxBuyTax: this.input.config.security.max_buy_tax,
-              maxSellTax: this.input.config.security.max_sell_tax,
-              maxTop10Percent: this.input.config.security.max_top10_percent,
-              maxTeamPercent: this.input.config.security.max_team_percent
-            }
+            snapshotSafetyThresholds: safetyThresholds(this.input.config)
           }
         : {}),
       ...(source === 'trending' ? { maxRank: this.input.config.polling.trending_max_rank } : {})
     });
     let persisted = 0;
     for (const event of events) {
+      if (this.#stopped) break;
       const stored = event.sourceEventId
         ? await this.input.storage.persistDiscoveryEvent(event)
         : Boolean(
@@ -145,6 +146,7 @@ export class DiscoveryRuntime {
 
   async start(intervalMs = 250): Promise<void> {
     if (this.#timer) return;
+    this.#stopped = false;
     await this.recover();
     this.#timer = setInterval(
       () =>
@@ -172,9 +174,15 @@ export class DiscoveryRuntime {
   }
 
   stop(): void {
+    this.#stopped = true;
     if (!this.#timer) return;
     clearInterval(this.#timer);
     this.#timer = null;
+  }
+
+  async drain(): Promise<void> {
+    await this.tasks.drain();
+    await this.work.drain();
   }
 }
 

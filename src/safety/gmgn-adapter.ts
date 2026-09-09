@@ -1,6 +1,6 @@
 import { normalizeBooleanFlag, type DeepSafetyData } from './deep-gate.js';
 import type { PermissionSafetyData } from './permission-gate.js';
-import { normalizeRate } from './normalize.js';
+import { normalizeRate, normalizeRatio } from './normalize.js';
 
 type RecordValue = Record<string, unknown>;
 
@@ -14,11 +14,11 @@ export function adaptGmgnSafety(input: { info: unknown; security: unknown; pool:
   return {
     deep: {
       info: {
-        buyTax: security.buy_tax,
-        sellTax: security.sell_tax
+        buyTax: ratio(security.buy_tax),
+        sellTax: ratio(security.sell_tax)
       },
       security: {
-        top10Percent: security.top_10_holder_rate,
+        top10Percent: ratio(security.top_10_holder_rate),
         teamPercent: statValue(info, 'dev_team_hold_rate'),
         entrapmentPercent: statValue(info, 'top_entrapment_trader_percentage'),
         bundlerPercent: statValue(info, 'top_bundler_trader_percentage'),
@@ -64,8 +64,16 @@ function dataRecord(value: unknown): RecordValue {
 function statValue(info: RecordValue, key: string): unknown {
   const stat = info.stat;
   return stat && typeof stat === 'object' && !Array.isArray(stat)
-    ? (stat as RecordValue)[key]
+    ? ratio((stat as RecordValue)[key])
     : undefined;
+}
+function ratio(value: unknown): unknown {
+  try {
+    normalizeRatio(value, 'gmgn.ratio');
+    return value;
+  } catch {
+    return undefined;
+  }
 }
 function lockPercent(security: RecordValue): unknown {
   const summary = security.lock_summary;

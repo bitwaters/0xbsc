@@ -1,4 +1,3 @@
-import { hashValue } from './protocol.js';
 import { quoteReuseKey, type QuoteObservation } from './measurement.js';
 
 export interface QuoteRequest {
@@ -49,20 +48,4 @@ export class ResearchQuoteCache {
       return null;
     return structuredClone(entry.quote);
   }
-}
-export function resourceExclusion(
-  opportunityId: string,
-  decisionAtMs: number,
-  leg: string,
-  reason: string
-) {
-  if (!Number.isSafeInteger(decisionAtMs) || decisionAtMs < 0) throw new Error('RESOURCE_TIME');
-  return Object.freeze({
-    id: hashValue([opportunityId, decisionAtMs, leg]),
-    opportunityId,
-    decisionAtMs,
-    leg,
-    status: 'EXECUTION_NOT_EVALUATED_RESOURCE',
-    reason
-  });
 }

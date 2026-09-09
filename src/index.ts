@@ -1,3 +1,4 @@
+import { TaskGroup } from './runtime/task-group.js';
 import { TrialRuntime } from './decision/trial-runtime.js';
 import {
   loadPublicationModel,
@@ -54,6 +55,8 @@ import { apiMetricEndpoint, MetricsCollector } from './observability/metrics.js'
 import { chooseBudgetAction } from './gmgn/degradation.js';
 import { Decimal } from 'decimal.js';
 
+const backgroundTasks = new TaskGroup();
+let shuttingDown = false;
 const configPath = process.argv[2] ?? `${process.env.HOME}/.config/gmgn-signal-bot/config.yaml`;
 const loaded = await loadRuntimeConfig(configPath);
 const publicationModel = loadPublicationModel(loaded.config);
@@ -180,16 +183,20 @@ const trialRuntime = isTrial
 await trialRuntime?.start();
 const trialTimer = trialRuntime
   ? setInterval(() => {
-      void trialRuntime
-        .tick()
-        .catch(() => console.error(JSON.stringify({ event: 'trial_tick_failed' })));
+      void backgroundTasks.track(
+        trialRuntime
+          .tick()
+          .catch(() => console.error(JSON.stringify({ event: 'trial_tick_failed' })))
+      );
     }, 100)
   : null;
 const trialOutcomeTimer = trialRuntime
   ? setInterval(() => {
-      void trialRuntime
-        .outcomeTick()
-        .catch(() => console.error(JSON.stringify({ event: 'trial_outcome_failed' })));
+      void backgroundTasks.track(
+        trialRuntime
+          .outcomeTick()
+          .catch(() => console.error(JSON.stringify({ event: 'trial_outcome_failed' })))
+      );
     }, 250)
   : null;
 const researchRuntime =
@@ -199,7 +206,9 @@ const researchRuntime =
 await researchRuntime?.start();
 const researchTimer = researchRuntime
   ? setInterval(() => {
-      void researchRuntime.tick().catch(() => researchRecorder?.stop('RESEARCH_RUNTIME_FAILED'));
+      void backgroundTasks.track(
+        researchRuntime.tick().catch(() => researchRecorder?.stop('RESEARCH_RUNTIME_FAILED'))
+      );
     }, 1000)
   : null;
 const safety = new SafetyRuntime(loaded.config, candidateApi, () => clock.now());
@@ -754,7 +763,7 @@ const processCandidate = (
             nowMs: clock.now()
           });
           await timeline.record('outbox', { signalCreated: outbox === 'created' });
-          if (outbox === 'created') void deliverPendingOutbox();
+          if (outbox === 'created') void backgroundTasks.track(deliverPendingOutbox());
         } else if (
           activeEpisodeId &&
           quote &&
@@ -893,9 +902,11 @@ const outboxDelivery = new OutboxDeliveryService({
   },
   onConfirmed: (signal, confirmedAtMs) => {
     if (trialRuntime) return trialRuntime.confirmed(signal, confirmedAtMs);
-    void researchRuntime
-      ?.confirmed(signal, confirmedAtMs)
-      .catch(() => researchRecorder?.stop('ACTUAL_BASELINE_CAPTURE_FAILED'));
+    void backgroundTasks.track(
+      researchRuntime
+        ?.confirmed(signal, confirmedAtMs)
+        .catch(() => researchRecorder?.stop('ACTUAL_BASELINE_CAPTURE_FAILED')) ?? Promise.resolve()
+    );
     return withGmgnContext({ purpose: 'baseline' }, async () => {
       const decision = asRecord(signal.decision);
       const tokenAddress = requiredString(decision.tokenAddress, 'tokenAddress');
@@ -965,27 +976,29 @@ const discovery = new DiscoveryRuntime({
 });
 if (!isTrial) routes.restore(await storage.activeEvidenceEvents(clock.now()));
 await discovery.start();
-void deliverPendingOutbox();
+void backgroundTasks.track(deliverPendingOutbox());
 const outboxDeliveryTimer = setInterval(() => {
-  void deliverPendingOutbox();
+  void backgroundTasks.track(deliverPendingOutbox());
 }, 250);
 let telegramPollRunning = false;
 const telegramPollTimer = setInterval(() => {
   if (telegramPollRunning) return;
   telegramPollRunning = true;
-  void telegramPoller
-    .pollOnce()
-    .catch((error: unknown) =>
-      console.error(
-        JSON.stringify({
-          event: 'telegram_poll_failed',
-          error: error instanceof Error ? error.message : 'unknown error'
-        })
+  void backgroundTasks.track(
+    telegramPoller
+      .pollOnce()
+      .catch((error: unknown) =>
+        console.error(
+          JSON.stringify({
+            event: 'telegram_poll_failed',
+            error: error instanceof Error ? error.message : 'unknown error'
+          })
+        )
       )
-    )
-    .finally(() => {
-      telegramPollRunning = false;
-    });
+      .finally(() => {
+        telegramPollRunning = false;
+      })
+  );
 }, 250);
 let dueLoopRunning = false;
 let gmgnBackgroundBackoffUntilMs = 0;
@@ -993,165 +1006,175 @@ const dueTimer = setInterval(() => {
   if (isTrial || dueLoopRunning) return;
   dueLoopRunning = true;
   const nowMs = clock.now();
-  void storage
-    .expireObservations(nowMs)
-    .then(() => storage.dueObservationEvents(nowMs))
-    .then(async (events) => {
-      const now = clock.now();
-      if (now < gmgnBackgroundBackoffUntilMs) return;
-      const utilization = schedulerUtilization(now);
-      const admitted = await Promise.all(
-        events.map(async (event) => {
-          const action = chooseBudgetAction({
-            kind: 'observation',
-            score: event.observationScore ?? 0,
-            nowMs: now,
-            deadlineMs: event.expiresAtMs,
-            utilization
-          });
-          if (action.action === 'expire') {
-            await storage.expireObservations(now);
-            return null;
-          }
-          if (action.reevaluationMultiplier > 1) {
-            await storage.rescheduleObservation(
-              event.episodeId,
-              now +
-                loaded.config.polling.observation_seconds * 1_000 * action.reevaluationMultiplier,
-              now
+  void backgroundTasks.track(
+    storage
+      .expireObservations(nowMs)
+      .then(() => storage.dueObservationEvents(nowMs))
+      .then(async (events) => {
+        const now = clock.now();
+        if (now < gmgnBackgroundBackoffUntilMs) return;
+        const utilization = schedulerUtilization(now);
+        const admitted = await Promise.all(
+          events.map(async (event) => {
+            const action = chooseBudgetAction({
+              kind: 'observation',
+              score: event.observationScore ?? 0,
+              nowMs: now,
+              deadlineMs: event.expiresAtMs,
+              utilization
+            });
+            if (action.action === 'expire') {
+              await storage.expireObservations(now);
+              return null;
+            }
+            if (action.reevaluationMultiplier > 1) {
+              await storage.rescheduleObservation(
+                event.episodeId,
+                now +
+                  loaded.config.polling.observation_seconds * 1_000 * action.reevaluationMultiplier,
+                now
+              );
+              return null;
+            }
+            return event;
+          })
+        );
+        for (const event of admitted) {
+          if (shuttingDown) break;
+          if (!event) continue;
+          try {
+            await processCandidate(event, {
+              priority: 'observation',
+              forceKline: true,
+              observationEpisodeId: event.episodeId
+            });
+          } catch (error) {
+            const failedAtMs = clock.now();
+            const retryAtMs = gmgnRetryDeadline(error, failedAtMs);
+            await storage.rescheduleObservation(event.episodeId, retryAtMs, failedAtMs);
+            if (error instanceof GmgnError && error.kind === 'rate_limit')
+              gmgnBackgroundBackoffUntilMs = Math.max(gmgnBackgroundBackoffUntilMs, retryAtMs);
+            console.error(
+              JSON.stringify({
+                event: 'observation_reevaluation_failed',
+                episode_id: event.episodeId,
+                retry_at_ms: retryAtMs,
+                error: error instanceof Error ? error.message : 'unknown error'
+              })
             );
-            return null;
+            if (error instanceof GmgnError && error.kind === 'rate_limit') break;
           }
-          return event;
-        })
-      );
-      for (const event of admitted) {
-        if (!event) continue;
-        try {
-          await processCandidate(event, {
-            priority: 'observation',
-            forceKline: true,
-            observationEpisodeId: event.episodeId
-          });
-        } catch (error) {
-          const failedAtMs = clock.now();
-          const retryAtMs = gmgnRetryDeadline(error, failedAtMs);
-          await storage.rescheduleObservation(event.episodeId, retryAtMs, failedAtMs);
-          if (error instanceof GmgnError && error.kind === 'rate_limit')
-            gmgnBackgroundBackoffUntilMs = Math.max(gmgnBackgroundBackoffUntilMs, retryAtMs);
-          console.error(
-            JSON.stringify({
-              event: 'observation_reevaluation_failed',
-              episode_id: event.episodeId,
-              retry_at_ms: retryAtMs,
-              error: error instanceof Error ? error.message : 'unknown error'
-            })
-          );
-          if (error instanceof GmgnError && error.kind === 'rate_limit') break;
         }
-      }
-    })
-    .catch((error: unknown) =>
-      console.error(
-        JSON.stringify({
-          event: 'observation_reevaluation_failed',
-          error: error instanceof Error ? error.message : 'unknown error'
-        })
+      })
+      .catch((error: unknown) =>
+        console.error(
+          JSON.stringify({
+            event: 'observation_reevaluation_failed',
+            error: error instanceof Error ? error.message : 'unknown error'
+          })
+        )
       )
-    )
-    .finally(() => {
-      dueLoopRunning = false;
-    });
+      .finally(() => {
+        dueLoopRunning = false;
+      })
+  );
 }, 250);
 let prewatchRunning = false;
 const prewatchTimer = setInterval(() => {
   if (isTrial || prewatchRunning || dueLoopRunning || clock.now() < scheduler.cooldownUntilMs)
     return;
   prewatchRunning = true;
-  void (async () => {
-    const now = clock.now();
-    if (
-      loaded.config.optimization.enabled &&
-      schedulerUtilization(clock.now()) < 0.7 &&
-      clock.now() >= scheduler.cooldownUntilMs
-    ) {
-      for (const watch of await storage.dueCandidateWatches(
-        now,
-        loaded.config.optimization.prewatch_seconds * 1000
-      )) {
-        try {
-          await processCandidate(watch, {
-            priority: 'evaluation',
-            forceKline: true,
-            researchOnly: true
-          });
-        } catch (error) {
-          if (!(error instanceof GmgnError && error.kind === 'rate_limit'))
-            await storage.removeCandidateWatch(watch.tokenAddress);
-          console.error(
-            JSON.stringify({
-              event: 'prewatch_failed',
-              error: error instanceof Error ? error.message : 'unknown'
-            })
-          );
+  void backgroundTasks.track(
+    (async () => {
+      const now = clock.now();
+      if (
+        loaded.config.optimization.enabled &&
+        schedulerUtilization(clock.now()) < 0.7 &&
+        clock.now() >= scheduler.cooldownUntilMs
+      ) {
+        for (const watch of await storage.dueCandidateWatches(
+          now,
+          loaded.config.optimization.prewatch_seconds * 1000
+        )) {
+          if (shuttingDown) break;
+          try {
+            await processCandidate(watch, {
+              priority: 'evaluation',
+              forceKline: true,
+              researchOnly: true
+            });
+          } catch (error) {
+            if (!(error instanceof GmgnError && error.kind === 'rate_limit'))
+              await storage.removeCandidateWatch(watch.tokenAddress);
+            console.error(
+              JSON.stringify({
+                event: 'prewatch_failed',
+                error: error instanceof Error ? error.message : 'unknown'
+              })
+            );
+          }
         }
       }
-    }
-  })()
-    .catch(() => console.error(JSON.stringify({ event: 'prewatch_loop_failed' })))
-    .finally(() => {
-      prewatchRunning = false;
-    });
+    })()
+      .catch(() => console.error(JSON.stringify({ event: 'prewatch_loop_failed' })))
+      .finally(() => {
+        prewatchRunning = false;
+      })
+  );
 }, 1000);
 let outcomeLoopRunning = false;
 const outcomeTimer = setInterval(() => {
   if (outcomeLoopRunning) return;
   outcomeLoopRunning = true;
-  void withGmgnContext({ priority: 'evaluation', purpose: 'outcome' }, () => runDueOutcomeTasks())
-    .catch((error: unknown) =>
-      console.error(
-        JSON.stringify({
-          event: 'outcome_checkpoint_failed',
-          error: error instanceof Error ? error.message : 'unknown error'
-        })
+  void backgroundTasks.track(
+    withGmgnContext({ priority: 'evaluation', purpose: 'outcome' }, () => runDueOutcomeTasks())
+      .catch((error: unknown) =>
+        console.error(
+          JSON.stringify({
+            event: 'outcome_checkpoint_failed',
+            error: error instanceof Error ? error.message : 'unknown error'
+          })
+        )
       )
-    )
-    .finally(() => {
-      outcomeLoopRunning = false;
-    });
+      .finally(() => {
+        outcomeLoopRunning = false;
+      })
+  );
 }, 250);
 let metricSnapshotRunning = false;
 const metricTimer = setInterval(() => {
   if (metricSnapshotRunning) return;
   metricSnapshotRunning = true;
-  void storage
-    .retainAudit(clock.now(), loaded.config.storage.raw_payload_retention_days)
-    .then(() => metrics.snapshot(storage, clock.now()))
-    .then((snapshot) => {
-      const business = businessHealth.snapshot(true);
-      scheduler.setResearchMonitoringHealthy(business.status === 'ready');
-      console.log(
-        JSON.stringify({
-          event: 'runtime_metrics',
-          ...snapshot,
-          gmgn: scheduler.snapshot(),
-          business,
-          checkpoint: checkpointer.snapshot()
-        })
-      );
-    })
-    .catch((error: unknown) => {
-      scheduler.setResearchMonitoringHealthy(false);
-      console.error(
-        JSON.stringify({
-          event: 'runtime_metrics_failed',
-          error: error instanceof Error ? error.message : 'unknown error'
-        })
-      );
-    })
-    .finally(() => {
-      metricSnapshotRunning = false;
-    });
+  void backgroundTasks.track(
+    storage
+      .retainAudit(clock.now(), loaded.config.storage.raw_payload_retention_days)
+      .then(() => metrics.snapshot(storage, clock.now()))
+      .then((snapshot) => {
+        const business = businessHealth.snapshot(true);
+        scheduler.setResearchMonitoringHealthy(business.status === 'ready');
+        console.log(
+          JSON.stringify({
+            event: 'runtime_metrics',
+            ...snapshot,
+            gmgn: scheduler.snapshot(),
+            business,
+            checkpoint: checkpointer.snapshot()
+          })
+        );
+      })
+      .catch((error: unknown) => {
+        scheduler.setResearchMonitoringHealthy(false);
+        console.error(
+          JSON.stringify({
+            event: 'runtime_metrics_failed',
+            error: error instanceof Error ? error.message : 'unknown error'
+          })
+        );
+      })
+      .finally(() => {
+        metricSnapshotRunning = false;
+      })
+  );
 }, 60_000);
 const writeHealth = () =>
   writeFileSync(
@@ -1178,6 +1201,8 @@ const healthTimer = setInterval(writeHealth, 5000);
 console.log(JSON.stringify({ event: 'discovery_started', revision_id: loaded.revisionId }));
 for (const signal of ['SIGINT', 'SIGTERM'] as const)
   process.once(signal, () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     if (researchTimer) clearInterval(researchTimer);
     researchRecorder?.close();
     businessHealth.close();
@@ -1192,16 +1217,28 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const)
     clearInterval(prewatchTimer);
     discovery.stop();
     void (async () => {
+      await discovery.drain();
+      await backgroundTasks.drain();
+      await outboxDelivery.drain();
+      await backgroundTasks.drain();
       await trialRuntime?.close();
+      await researchRecorder?.drain();
+      await storage.write(() => undefined);
       await checkpointer.close();
-    })().finally(() => {
-      storage.close();
-      process.exit(0);
-    });
+    })().then(
+      () => {
+        storage.close();
+        process.exit(0);
+      },
+      () => {
+        console.error(JSON.stringify({ event: 'shutdown_drain_failed' }));
+        process.exit(1);
+      }
+    );
   });
 
 async function deliverPendingOutbox(): Promise<void> {
-  if (loaded.config.runtime.mode !== 'live' || outboxDeliveryRunning) return;
+  if (shuttingDown || loaded.config.runtime.mode !== 'live' || outboxDeliveryRunning) return;
   outboxDeliveryRunning = true;
   try {
     await outboxDelivery.recoverAndDeliver();
@@ -1343,6 +1380,7 @@ async function runDueOutcomeTasks(): Promise<void> {
   const nowMs = clock.now();
   if (nowMs < gmgnBackgroundBackoffUntilMs) return;
   for (const task of await storage.dueOutcomeTasks(nowMs)) {
+    if (shuttingDown) break;
     try {
       const budget = chooseBudgetAction({
         kind: 'result',
