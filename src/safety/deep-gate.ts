@@ -37,6 +37,7 @@ export interface DeepSafetyResult {
   reason: string | null;
   attempts: number;
   data?: DeepSafetyData;
+  details?: { field: string; actual: string; limit: number };
 }
 
 const requiredRates = [
@@ -98,12 +99,14 @@ export function evaluateDeepSafety(
   }
   for (const [source, field, threshold, label] of requiredRates) {
     try {
-      if (
-        normalizeRate((data[source] as Record<string, unknown>)[field], label).gt(
-          thresholds[threshold]
-        )
-      )
-        return { allowed: false, reason: `${label}_limit`, attempts: 0 };
+      const actual = normalizeRate((data[source] as Record<string, unknown>)[field], label);
+      if (actual.gt(thresholds[threshold]))
+        return {
+          allowed: false,
+          reason: `${label}_limit`,
+          attempts: 0,
+          details: { field, actual: actual.toString(), limit: thresholds[threshold] }
+        };
     } catch {
       return { allowed: false, reason: `${label}_invalid`, attempts: 0 };
     }

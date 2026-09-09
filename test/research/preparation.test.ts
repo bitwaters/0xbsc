@@ -200,3 +200,62 @@ void test('unsafe initial candidates never become qualified or request quotes; l
   assert.ok(failed.result.qualification);
   assert.equal(failed.buyCalls, 1);
 });
+
+void test('marginal cost rejection preserves the exact loss and unchanged limits', async () => {
+  const { result } = await run(undefined, {
+    ...sell,
+    inputUsd: '9.99',
+    outputUsd: '9.782668444736'
+  });
+  assert.equal(result.status, 'CANCELLED');
+  assert.equal(result.reason, 'PREPARATION_COST_FAILED');
+  const details = result.details as {
+    cost: { sellOneWayLoss: string };
+    limits: { oneWay: number; roundTrip: number };
+  };
+  assert.ok(Number(details.cost.sellOneWayLoss) > 0.02);
+  assert.equal(details.limits.oneWay, config.quote.max_one_way_loss['10']);
+  assert.equal(details.limits.roundTrip, config.quote.max_round_trip_loss['10']);
+  assert.ok(result.qualification);
+});
+void test('final market rejection records the original state, exact inputs and evaluation time', async () => {
+  const { result, state } = await run((b) => {
+    b.info.payload.price = { price: '0.5' };
+  });
+  assert.equal(result.reason, 'FINAL_MARKET_RECHECK_FAILED');
+  const details = result.details as {
+    inputFactIds: string[];
+    previousState: { anchorPrice: string };
+    evaluationAtMs: number;
+    decision: { stageResults: { entry: string } };
+  };
+  assert.ok(details.inputFactIds.length);
+  assert.equal(details.previousState.anchorPrice, state.anchorPrice);
+  assert.equal(details.evaluationAtMs, 20500);
+  assert.equal(details.decision.stageResults.entry, 'FAIL');
+});
+void test('stale holders and a changed pool retain endpoint and data failure identity', async () => {
+  for (const [change, reason, endpoint] of [
+    [
+      (b: RiskBundle) => {
+        b.holders.requestedAtMs = -400000;
+      },
+      'RISK_FACT_STALE',
+      'holders'
+    ],
+    [
+      (b: RiskBundle) => {
+        b.pool.poolRevision = '0x' + 'd'.repeat(40);
+      },
+      'RISK_POOL_CHANGED',
+      'pool'
+    ]
+  ] as const) {
+    const { result } = await run(undefined, sell, change);
+    assert.equal(result.status, 'CANCELLED');
+    if (result.status !== 'CANCELLED') throw new Error('EXPECTED_CANCELLATION');
+    assert.equal(result.reason, reason);
+    assert.equal(result.details?.kind, 'data');
+    assert.equal(result.details?.endpoint, endpoint);
+  }
+});

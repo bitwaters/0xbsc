@@ -2,9 +2,7 @@ import type { RuntimeConfig } from '../config/types.js';
 import type { CandidateGmgnApi } from '../gmgn/api.js';
 import type { MarketFact } from '../gmgn/facts.js';
 import { decimalValue } from '../gmgn/facts.js';
-import { adaptGmgnSafety } from '../safety/gmgn-adapter.js';
-import { evaluateDeepSafety } from '../safety/deep-gate.js';
-import { evaluatePermissionAndLpSafety } from '../safety/permission-gate.js';
+import { GmgnError } from '../gmgn/errors.js';
 import { LazySafetyRuntime } from '../safety/lazy-runtime.js';
 import type { TraderSnapshot } from '../safety/coordinated-exit.js';
 import { evaluateTier } from '../quote/gate.js';
@@ -17,6 +15,7 @@ import {
   type DryPreparation
 } from './dry-publisher.js';
 import { evaluateOpportunity } from './opportunity.js';
+import { creatorAddress, factProblem, screenBasic, type RiskFinding } from './risk-screen.js';
 
 export interface RiskBundle {
   token: string;
@@ -44,8 +43,27 @@ export async function assessRiskBundle(
   config: RuntimeConfig,
   nowMs: number
 ): Promise<string | null> {
+  return (await riskBundleFinding(bundle, context, config, nowMs))?.reason ?? null;
+}
+async function riskBundleFinding(
+  bundle: RiskBundle,
+  context: Readonly<DecisionContext>,
+  config: RuntimeConfig,
+  nowMs: number
+): Promise<RiskFinding | null> {
+  const base = {
+    factIds: [
+      bundle.info,
+      bundle.security,
+      bundle.pool,
+      bundle.holders,
+      bundle.traders,
+      bundle.created
+    ].map((f) => f.factId),
+    expiresAtMs: nowMs
+  };
   if (bundle.token !== context.token || bundle.poolRevision !== context.poolRevision)
-    return 'RISK_POOL_OR_TOKEN_CHANGED';
+    return { ...base, kind: 'data', reason: 'RISK_POOL_OR_TOKEN_CHANGED' };
   const items = [
     [bundle.info, 'info', config.quote.security_pool_max_age_seconds * 1000],
     [bundle.security, 'security', config.quote.security_pool_max_age_seconds * 1000],
@@ -59,51 +77,23 @@ export async function assessRiskBundle(
     [bundle.created, 'created_tokens', (config.scoring?.data_ttl_seconds.creator ?? 3600) * 1000]
   ] as const;
   for (const [fact, endpoint, ttl] of items) {
-    if (
-      fact.endpoint !== endpoint ||
-      !Number.isSafeInteger(fact.requestedAtMs) ||
-      fact.requestedAtMs > fact.receivedAtMs ||
-      fact.receivedAtMs > nowMs ||
-      nowMs - fact.requestedAtMs > ttl ||
-      (endpoint !== 'created_tokens' &&
-        (fact.token !== context.token || fact.poolRevision !== context.poolRevision)) ||
-      fact.qualityFlags.some(
-        (f) => !['PRICE_SOURCE_TIME_UNVERIFIED', 'TOP_WALLET_COVERAGE_ONLY'].includes(f)
-      )
-    )
-      return 'RISK_FACT_UNVERIFIED_OR_STALE';
+    const bad = factProblem(fact, endpoint, context.token, context.poolRevision, ttl, nowMs);
+    if (bad) return bad;
   }
-  const creator =
-    (bundle.info.payload.dev as { creator_address?: string } | undefined)?.creator_address ??
-    (bundle.info.payload.pool as { creator?: string } | undefined)?.creator;
-  if (!creator || bundle.created.request.wallet_address !== creator)
-    return 'CREATOR_FACT_IDENTITY_MISMATCH';
-  const adapted = adaptGmgnSafety({
-    info: bundle.info.payload,
-    security: bundle.security.payload,
-    pool: bundle.pool.payload
-  });
-  const s = config.security;
-  const deep = evaluateDeepSafety(
-    adapted.deep,
-    {
-      maxBuyTax: s.max_buy_tax,
-      maxSellTax: s.max_sell_tax,
-      maxTop10Percent: s.max_top10_percent,
-      maxTeamPercent: s.max_team_percent,
-      maxEntrapmentPercent: s.max_entrapment_percent,
-      maxBundlerPercent: s.max_bundler_percent,
-      maxSniperPercent: s.max_sniper_percent,
-      fatalFlags: s.fatal_flags
-    },
-    new Set(s.fatal_flags)
-  );
-  if (!deep.allowed) return deep.reason ?? 'DEEP_RISK_FAILED';
-  const permission = evaluatePermissionAndLpSafety(
-    adapted.permission,
-    s.min_lp_locked_or_burned_percent
-  );
-  if (!permission.allowed) return permission.reason ?? 'PERMISSION_FAILED';
+  const creator = creatorAddress(bundle.info);
+  if (
+    !creator ||
+    typeof bundle.created.request.wallet_address !== 'string' ||
+    bundle.created.request.wallet_address.toLowerCase() !== creator.toLowerCase()
+  )
+    return {
+      ...base,
+      kind: 'data',
+      endpoint: 'created_tokens',
+      reason: 'CREATOR_FACT_IDENTITY_MISMATCH'
+    };
+  const basic = screenBasic(bundle.info, bundle.security, bundle.pool, config, nowMs);
+  if (basic) return basic;
   // Reuse the exact legacy holder/creator/coordinated-exit semantics without its market routes.
   const unavailable = () => Promise.reject(new Error('UNEXPECTED_RISK_API'));
   const api: CandidateGmgnApi = {
@@ -119,7 +109,9 @@ export async function assessRiskBundle(
   if (bundle.traderBaseline)
     lazy.traderSnapshots.set(context.token.toLowerCase(), bundle.traderBaseline);
   const result = await lazy.evaluate(context.token, bundle.info.payload);
-  return result.allowed ? null : (result.reason ?? 'LAZY_RISK_UNVERIFIED');
+  return result.allowed
+    ? null
+    : { ...base, kind: 'risk', reason: result.reason ?? 'LAZY_RISK_UNVERIFIED' };
 }
 export interface PreparationAdapter {
   capture(context: Readonly<DecisionContext>): Promise<RiskBundle>;
@@ -144,18 +136,23 @@ export async function prepareDryOpportunity(
       let stage = 'INITIAL_SAFETY';
       try {
         const check = async (bundle: RiskBundle) => {
-          const error = await assessRiskBundle(bundle, context, input.config, input.now());
-          if (error) throw new PreparationFailure(error, qualification);
+          const error = await riskBundleFinding(bundle, context, input.config, input.now());
+          if (error)
+            throw new PreparationFailure(error.reason, qualification, {
+              stage,
+              ...error
+            });
         };
         const initial = await input.adapter.capture(context);
         await check(initial);
+        const marketAtMs = input.now();
         const market = evaluateOpportunity(
           input.state,
           {
             model: input.manifest,
             token: context.token,
             poolRevision: initial.poolRevision,
-            evaluationAtMs: input.now(),
+            evaluationAtMs: marketAtMs,
             facts: [...initial.facts.filter((f) => f.factId !== initial.info.factId), initial.info]
           },
           context.modelHash
@@ -167,7 +164,16 @@ export async function prepareDryOpportunity(
           market.stageResults.confirmation !== 'PASS' ||
           market.stageResults.invalidation !== 'FAIL'
         )
-          throw new PreparationFailure('MARKET_CHANGED_BEFORE_PREPARATION');
+          throw new PreparationFailure('MARKET_CHANGED_BEFORE_PREPARATION', null, {
+            stage: 'INITIAL_MARKET',
+            kind: 'market',
+            decision: market,
+            inputFactIds: [
+              ...initial.facts.filter((f) => f.factId !== initial.info.factId),
+              initial.info
+            ].map((f) => f.factId),
+            evaluationAtMs: marketAtMs
+          });
         qualification = {
           atMs: input.now(),
           factIds: [
@@ -201,7 +207,11 @@ export async function prepareDryOpportunity(
           ) ||
           pairedQuoteReturn(buy, sell) === null
         )
-          throw new Error('PREPARATION_QUOTE_PAIR_INVALID');
+          throw new PreparationFailure('PREPARATION_QUOTE_PAIR_INVALID', qualification, {
+            stage: 'QUOTE_PAIR',
+            kind: 'data',
+            factIds: [buy.factId, sell.factId]
+          });
         const leg = (q: QuoteObservation) => ({
           direction: q.direction,
           inputUsd: q.inputUsd,
@@ -216,7 +226,18 @@ export async function prepareDryOpportunity(
           maxRoundTripLoss: input.config.quote.max_round_trip_loss['10'],
           maxSlippage: input.config.quote.max_slippage_percent
         });
-        if (!decision.passes) throw new Error(decision.reason ?? 'PREPARATION_COST_FAILED');
+        if (!decision.passes)
+          throw new PreparationFailure('PREPARATION_COST_FAILED', qualification, {
+            stage: 'COST',
+            kind: 'cost',
+            cost: decision,
+            factIds: [buy.factId, sell.factId],
+            limits: {
+              oneWay: input.config.quote.max_one_way_loss['10'],
+              roundTrip: input.config.quote.max_round_trip_loss['10'],
+              slippage: input.config.quote.max_slippage_percent
+            }
+          });
         return {
           qualification,
           requestedNotionalUsd: '10',
@@ -231,8 +252,20 @@ export async function prepareDryOpportunity(
           quoteReceivedAtMs: sell.receivedAtMs
         };
       } catch (error) {
-        if (error instanceof PreparationFailure) throw error;
-        throw new PreparationFailure(`PREPARATION_${stage}_FAILED`, qualification);
+        if (error instanceof PreparationFailure)
+          throw new PreparationFailure(error.message, error.qualification ?? qualification, {
+            stage,
+            ...error.details
+          });
+        throw new PreparationFailure(
+          error instanceof GmgnError ? `API_${error.kind}` : `PREPARATION_${stage}_FAILED`,
+          qualification,
+          {
+            stage,
+            kind: 'error',
+            cause: error instanceof GmgnError ? error.kind : 'UNCLASSIFIED_ERROR'
+          }
+        );
       }
     }
   });

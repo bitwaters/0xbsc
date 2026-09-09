@@ -1,3 +1,5 @@
+import { TrialRotation, type WaitingCandidate } from './trial-rotation.js';
+import { screenInfo, screenBasic, type RiskFinding } from './risk-screen.js';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type { RuntimeConfig } from '../config/types.js';
@@ -30,6 +32,9 @@ import {
 const MAX_BYTES = 2 * 1024 ** 3;
 interface Watch {
   token: string;
+  key: string;
+  queuedAtMs: number;
+  basicAtMs?: number;
   firstAtMs: number;
   seenAtMs: number;
   dueAtMs: number;
@@ -56,7 +61,9 @@ export class TrialRuntime {
   private failure: string | null = null;
   private readonly codeHash = semanticBuild().hash;
   private universeRecorded = new Map<string, number>();
-  private admissionAfter = new Map<string, number>();
+  private readonly rotation = new TrialRotation();
+  private readonly rejected = new Map<string, { expiresAtMs: number; details: RiskFinding }>();
+  private maxAdmissionWaitMs = 0;
   private universePending: { atMs: number; metadata: Record<string, unknown> }[] = [];
   constructor(
     private readonly storage: Storage,
@@ -114,7 +121,9 @@ export class TrialRuntime {
           .get(opportunityId) as { state_json: string } | undefined;
         if (!row) throw new Error('OPPORTUNITY_MISSING');
         const state = JSON.parse(row.state_json) as OpportunityState;
-        const adapter = new LiveOpportunityAdapter(api, config, [], {} as MarketFact);
+        const adapter = new LiveOpportunityAdapter(api, config, [], {} as MarketFact, () =>
+          clock.now()
+        );
         const { decisionContext } = await import('./dry-publisher.js');
         return withGmgnContext(
           { priority: 'evaluation', purpose: 'outcome', deadlineMs: clock.now() + 5000 },
@@ -139,12 +148,38 @@ export class TrialRuntime {
         model: this.model.manifest,
         riskHash: riskPolicyHash(this.config),
         maxWatched: 50,
+        admission: {
+          policy: 'fifo-v1',
+          capacity: this.rotation.capacity,
+          staleMs: this.rotation.liveMs
+        },
+        riskScreen: 'existing-info-and-basic-limits-v1',
         inactiveRotationMs: 30000,
         readmissionDelayMs: 30000,
         pollMs: 10000
       },
       this.clock.now()
     );
+    const saved = this.storage.db
+      .prepare('SELECT value_json FROM trial_runtime_checkpoints WHERE state_key=?')
+      .get(this.rotationKey()) as { value_json: string } | undefined;
+    if (saved)
+      this.rotation.restore(JSON.parse(saved.value_json) as WaitingCandidate[], this.clock.now());
+    const cached = this.storage.db
+      .prepare(
+        'SELECT token,pool_revision,expires_at_ms,details_json FROM trial_risk_rejections WHERE risk_hash=? AND expires_at_ms>?'
+      )
+      .all(riskPolicyHash(this.config), this.clock.now()) as {
+      token: string;
+      pool_revision: string;
+      expires_at_ms: number;
+      details_json: string;
+    }[];
+    for (const row of cached)
+      this.rejected.set(row.token + row.pool_revision, {
+        expiresAtMs: row.expires_at_ms,
+        details: JSON.parse(row.details_json) as RiskFinding
+      });
     await this.calibrate();
     await this.measurements.recover(this.clock.now());
     await this.exits.recover();
@@ -177,35 +212,128 @@ export class TrialRuntime {
     if (this.closed || event.decisionEligible === false) return;
     const now = this.clock.now(),
       existing = this.watches.get(event.tokenAddress);
+    const hint = event.payload?.biggest_pool_address;
+    const pool =
+      typeof hint === 'string' && /^0x[0-9a-f]{40}$/i.test(hint) ? hint.toLowerCase() : undefined;
     if (existing) {
       existing.seenAtMs = now;
+      if (pool && existing.pool && pool !== existing.pool) {
+        delete existing.pool;
+        delete existing.trader;
+        delete existing.basicAtMs;
+        existing.facts = [];
+      }
       return;
     }
-    if ((this.admissionAfter.get(event.tokenAddress) ?? 0) > now) return;
-    this.admissionAfter.delete(event.tokenAddress);
-    if (this.watches.size >= 50) {
+    // The checkpoint must fit both the waiting queue and all occupied slots.
+    if (
+      !this.rotation.has(event.tokenAddress) &&
+      this.rotation.size + this.watches.size >= this.rotation.capacity
+    ) {
+      this.count('WAITING_CAPACITY_EXCLUDED');
       this.recordUniverse(event, 'RESOURCE_EXCLUDED');
-      this.count('WATCH_CAPACITY_EXCLUDED');
       return;
     }
-    this.watches.set(event.tokenAddress, {
-      token: event.tokenAddress,
-      firstAtMs: now,
+    const status = this.rotation.observe({
+      tokenAddress: event.tokenAddress,
+      key: event.key ?? '',
+      ...(pool ? { pool } : {}),
+      firstQueuedAtMs: now,
       seenAtMs: now,
-      dueAtMs: now,
-      activated: false,
-      facts: []
+      eligibleAtMs: now
     });
-    this.recordUniverse(event, 'WATCHED');
-    this.count('DISCOVERED');
+    if (status === 'queued') {
+      this.count('QUEUED');
+      this.recordUniverse(event, 'QUEUED');
+    }
+    if (status === 'overflow') {
+      this.count('WAITING_CAPACITY_EXCLUDED');
+      this.recordUniverse(event, 'RESOURCE_EXCLUDED');
+    }
   }
-  private recordUniverse(event: NormalizedEvent, status: string) {
+  private rotationKey() {
+    return 'fifo-v1:' + this.model.hash + ':' + riskPolicyHash(this.config);
+  }
+  private async checkpointRotation() {
+    const now = this.clock.now();
+    const rows = this.rotation.entries();
+    for (const w of this.watches.values())
+      rows.push({
+        tokenAddress: w.token,
+        key: w.key,
+        firstQueuedAtMs: w.queuedAtMs,
+        seenAtMs: w.seenAtMs,
+        eligibleAtMs: now,
+        ...(w.pool ? { pool: w.pool } : {})
+      });
+    await this.storage.transaction(() => {
+      this.storage.db
+        .prepare(
+          'INSERT INTO trial_runtime_checkpoints VALUES (?,?,?) ON CONFLICT(state_key) DO UPDATE SET updated_at_ms=excluded.updated_at_ms,value_json=excluded.value_json'
+        )
+        .run(this.rotationKey(), now, JSON.stringify(rows));
+      this.storage.db.prepare('DELETE FROM trial_risk_rejections WHERE expires_at_ms<=?').run(now);
+    });
+    for (const [k, v] of this.rejected) if (v.expiresAtMs <= now) this.rejected.delete(k);
+  }
+  private release(w: Watch, eligibleAtMs = this.clock.now() + 30000) {
+    this.watches.delete(w.token);
+    const status = this.rotation.observe({
+      tokenAddress: w.token,
+      key: w.key,
+      firstQueuedAtMs: this.clock.now(),
+      seenAtMs: w.seenAtMs,
+      eligibleAtMs,
+      ...(w.pool ? { pool: w.pool } : {})
+    });
+    if (status === 'overflow') {
+      this.count('WAITING_CAPACITY_EXCLUDED');
+      this.recordUniverse({ tokenAddress: w.token, key: w.key }, 'RESOURCE_EXCLUDED');
+    }
+  }
+  private admit() {
+    const now = this.clock.now();
+    // Bounded work even after a discovery burst or thousands of expired queue entries.
+    for (let i = 0; i < 50 && this.watches.size < 50; i++) {
+      const { candidate, expired } = this.rotation.take(now);
+      for (const row of expired) {
+        this.count('WAITING_EXPIRED');
+        this.recordUniverse(row, 'WAITING_EXPIRED');
+      }
+      if (!candidate) {
+        if (expired.length) continue;
+        break;
+      }
+      const wait = now - candidate.firstQueuedAtMs;
+      this.maxAdmissionWaitMs = Math.max(this.maxAdmissionWaitMs, wait);
+      this.watches.set(candidate.tokenAddress, {
+        token: candidate.tokenAddress,
+        key: candidate.key,
+        queuedAtMs: candidate.firstQueuedAtMs,
+        firstAtMs: now,
+        seenAtMs: candidate.seenAtMs,
+        dueAtMs: now,
+        activated: false,
+        facts: [],
+        ...(candidate.pool ? { pool: candidate.pool } : {})
+      });
+      this.count('DISCOVERED');
+      this.recordUniverse(candidate, 'WATCHED', { waitMs: wait });
+    }
+  }
+  private recordUniverse(
+    event: Pick<NormalizedEvent, 'tokenAddress' | 'key'>,
+    status: string,
+    extra: Record<string, unknown> = {}
+  ) {
     const now = this.clock.now(),
       key = event.tokenAddress + status;
     if (now - (this.universeRecorded.get(key) ?? -Infinity) < 60000) return;
-    if (this.universeRecorded.size >= 2000) this.universeRecorded.clear();
+    // Evict oldest dedup keys individually; clearing the map re-logs every discovery burst.
+    if (this.universeRecorded.size >= 60000)
+      this.universeRecorded.delete(this.universeRecorded.keys().next().value!);
     this.universeRecorded.set(key, now);
-    if (this.universePending.length >= 2000) {
+    if (this.universePending.length >= this.rotation.capacity * 2) {
       this.failure = 'TRIAL_UNIVERSE_BACKLOG';
       return;
     }
@@ -215,12 +343,67 @@ export class TrialRuntime {
         runId: this.runId,
         token: event.tokenAddress,
         eventKey: event.key,
-        reason: status
+        reason: status,
+        ...extra
       }
     });
   }
+  private async reject(w: Watch, finding: RiskFinding) {
+    const now = this.clock.now();
+    this.count(finding.reason);
+    this.count('EARLY_RISK_REJECTED');
+    const prior = w.pool
+      ? await this.research.loadOpportunity(this.runId, this.model.hash, w.token, w.pool)
+      : null;
+    if (prior && ['START_CANDIDATE', 'READY'].includes(prior.status))
+      await this.research.saveOpportunity(
+        this.runId,
+        {
+          ...prior,
+          status: 'INVALIDATED',
+          resetArmed: false,
+          lastEvaluationAtMs: now,
+          version: prior.version + 1
+        },
+        prior.version
+      );
+    await this.storage.transaction(() => {
+      if (w.pool && finding.expiresAtMs > now)
+        this.storage.db
+          .prepare(
+            'INSERT INTO trial_risk_rejections VALUES (?,?,?,?,?,?) ON CONFLICT(risk_hash,token,pool_revision) DO UPDATE SET reason=excluded.reason,expires_at_ms=excluded.expires_at_ms,details_json=excluded.details_json'
+          )
+          .run(
+            riskPolicyHash(this.config),
+            w.token,
+            w.pool,
+            finding.reason,
+            finding.expiresAtMs,
+            JSON.stringify(finding)
+          );
+      this.storage.db
+        .prepare(
+          "INSERT INTO operation_traces(correlation_id,stage,occurred_at_ms,metadata_json) VALUES (?,'trial_funnel',?,?)"
+        )
+        .run(
+          randomUUID(),
+          now,
+          JSON.stringify({
+            runId: this.runId,
+            token: w.token,
+            reason: finding.reason,
+            stage: 'EARLY_SAFETY',
+            details: finding,
+            opportunityId: prior?.opportunityId
+          })
+        );
+    });
+    if (w.pool && finding.expiresAtMs > now)
+      this.rejected.set(w.token + w.pool, { expiresAtMs: finding.expiresAtMs, details: finding });
+    this.release(w, Math.max(now, finding.expiresAtMs));
+  }
   private async drainUniverse() {
-    const batch = this.universePending.slice(0, 50);
+    const batch = this.universePending.slice(0, 200);
     if (!batch.length) return;
     await this.storage.transaction(() => {
       const insert = this.storage.db.prepare(
@@ -243,6 +426,9 @@ export class TrialRuntime {
       runId: this.runId,
       validation: 'UNVALIDATED',
       watching: this.watches.size,
+      waiting: this.rotation.size,
+      riskCacheEntries: this.rejected.size,
+      maxAdmissionWaitMs: this.maxAdmissionWaitMs,
       activatedWatching: [...this.watches.values()].filter((w) => w.activated).length,
       pendingUniverseWrites: this.universePending.length,
       running: this.running,
@@ -266,6 +452,7 @@ export class TrialRuntime {
         throw new Error('TRIAL_FACT_STORAGE_UNAVAILABLE');
   }
   private async calibrate() {
+    await this.checkpointRotation();
     const checkpoint = this.research.quotaCheckpoint();
     const bytes =
       this.storage.db.name === ':memory:'
@@ -298,6 +485,7 @@ export class TrialRuntime {
       for (const [key, w] of this.watches)
         if (this.clock.now() - w.seenAtMs > 120000 || this.clock.now() - w.firstAtMs > 600000)
           this.watches.delete(key);
+      this.admit();
       const watch = [...this.watches.values()]
         .filter((w) => w.dueAtMs <= this.clock.now())
         .sort(
@@ -317,18 +505,41 @@ export class TrialRuntime {
         this.count('TOKEN_ALREADY_DELIVERED_OR_UNKNOWN');
         return;
       }
+      const cached = watch.pool ? this.rejected.get(watch.token + watch.pool) : undefined;
+      if (cached && cached.expiresAtMs > this.clock.now()) {
+        this.count('RISK_CACHE_HIT');
+        this.recordUniverse({ tokenAddress: watch.token, key: watch.key }, 'RISK_CACHE_HIT', {
+          cachedReason: cached.details.reason,
+          until: cached.expiresAtMs
+        });
+        this.release(watch, cached.expiresAtMs);
+        return;
+      }
       await withGmgnContext(
         { priority: 'candidate', purpose: 'legacy_formal', deadlineMs: this.clock.now() + 30000 },
         async () => {
           const info = responseFact(await this.api.token('/v1/token/info', watch.token));
-          if (!info || info.poolRevision === 'unresolved') {
+          if (!info) {
             this.count('INFO_UNAVAILABLE');
+            this.release(watch);
             return;
           }
           await this.saveFact(info);
+          this.recordUniverse({ tokenAddress: watch.token, key: watch.key }, 'INFO_OBSERVED');
+          if (info.poolRevision === 'unresolved') {
+            this.recordUniverse(
+              { tokenAddress: watch.token, key: watch.key },
+              'INFO_POOL_UNRESOLVED',
+              { factId: info.factId }
+            );
+            this.count('INFO_UNAVAILABLE');
+            this.release(watch);
+            return;
+          }
           if (watch.pool && watch.pool !== info.poolRevision) {
             watch.facts = [];
             delete watch.trader;
+            delete watch.basicAtMs;
           }
           const oldPools = this.storage.db
             .prepare(
@@ -352,6 +563,11 @@ export class TrialRuntime {
             );
           }
           watch.pool = info.poolRevision;
+          const infoRisk = screenInfo(info, this.config, this.clock.now());
+          if (infoRisk) {
+            await this.reject(watch, infoRisk);
+            return;
+          }
           watch.facts = [
             ...watch.facts.filter((f) => this.clock.now() - f.receivedAtMs <= 60000),
             info
@@ -363,6 +579,7 @@ export class TrialRuntime {
               watch.token,
               info.poolRevision
             )) ?? watchingState(watch.token, info.poolRevision, this.model.hash);
+          const evaluationAtMs = this.clock.now();
           const decision = evaluateOpportunity(
             previous,
             {
@@ -370,7 +587,7 @@ export class TrialRuntime {
               token: watch.token,
               poolRevision: info.poolRevision,
               facts: watch.facts,
-              evaluationAtMs: this.clock.now()
+              evaluationAtMs
             },
             this.model.hash
           );
@@ -393,19 +610,52 @@ export class TrialRuntime {
               modelHash: this.model.hash,
               reason: decision.reason,
               stages: decision.stageResults,
+              evaluationAtMs,
+              inputFactIds: watch.facts.map((f) => f.factId),
+              previousState: previous,
               opportunityId: decision.state.opportunityId
             }
           });
           if (
-            decision.state.status === 'WATCHING' &&
-            this.clock.now() - watch.firstAtMs >= 30000 &&
-            watch.facts.length >= 2
+            decision.stageResults.activation === 'FAIL' ||
+            ['INVALIDATED', 'MISSED', 'CONSUMED'].includes(decision.state.status)
           ) {
-            this.watches.delete(watch.token);
-            if (this.admissionAfter.size >= 2000) this.admissionAfter.clear();
-            this.admissionAfter.set(watch.token, this.clock.now() + 30000);
+            this.release(watch);
             this.count('INACTIVE_WATCH_ROTATED');
             return;
+          }
+          if (!watch.activated && this.clock.now() - watch.firstAtMs >= 30000) {
+            this.count('DATA_WAIT_ROTATED');
+            this.recordUniverse({ tokenAddress: watch.token, key: watch.key }, 'DATA_WAIT_ROTATED');
+            this.release(watch);
+            return;
+          }
+          if (
+            decision.stageResults.activation === 'PASS' &&
+            (!watch.basicAtMs ||
+              this.clock.now() - watch.basicAtMs >=
+                this.config.quote.security_pool_max_age_seconds * 1000)
+          ) {
+            const security = responseFact(await this.api.token('/v1/token/security', watch.token));
+            const pool = responseFact(await this.api.token('/v1/token/pool_info', watch.token));
+            const received = [security, pool].filter((f): f is MarketFact => !!f);
+            await this.saveFacts(received);
+            if (!security || !pool) {
+              this.count('BASIC_FACT_MISSING');
+              this.release(watch);
+              return;
+            }
+            const basic = screenBasic(info, security, pool, this.config, this.clock.now());
+            if (basic) {
+              await this.reject(watch, basic);
+              return;
+            }
+            watch.basicAtMs = Math.min(
+              info.requestedAtMs,
+              security.requestedAtMs,
+              pool.requestedAtMs
+            );
+            this.count('BASIC_SAFETY_PASS');
           }
           if (decision.state.status !== 'READY' || decision.reason === 'DATA_WAIT') return;
           const now = this.clock.now(),
@@ -434,7 +684,8 @@ export class TrialRuntime {
             this.api,
             this.config,
             watch.facts,
-            watch.trader
+            watch.trader,
+            () => this.clock.now()
           );
           this.health?.safetyStarted();
           const result = await withGmgnContext({ priority: 'formal' }, () =>
@@ -456,7 +707,10 @@ export class TrialRuntime {
               token: watch.token,
               opportunityId: decision.state.opportunityId,
               reason: result.status === 'DRY_READY' ? 'PREPARATION_PASS' : result.reason,
-              qualification: result.qualification
+              qualification: result.qualification,
+              details: result.details,
+              inputFactIds: [...watch.facts, ...adapter.facts, watch.trader].map((f) => f.factId),
+              previousState: decision.state
             }
           });
           this.count(result.status === 'DRY_READY' ? 'PREPARATION_PASS' : result.reason);
@@ -464,6 +718,7 @@ export class TrialRuntime {
           await this.saveFacts(adapter.facts);
           if (result.status === 'CANCELLED') {
             await this.research.saveOpportunity(this.runId, result.state, decision.state.version);
+            this.release(watch);
             return;
           }
           const d = trialDecision({
@@ -503,7 +758,7 @@ export class TrialRuntime {
         correlationId: randomUUID(),
         stage: 'trial_error',
         occurredAtMs: this.clock.now(),
-        metadata: { reason }
+        metadata: { runId: this.runId, reason }
       });
     } finally {
       this.running = false;
@@ -569,7 +824,13 @@ export class TrialRuntime {
         if (this.clock.now() >= confirmedAtMs + 5000) throw new Error('BASELINE_DEADLINE_EXPIRED');
         if (!(await this.measurements.claimBaselineAttempt(quoteId, this.clock.now())))
           throw new Error('BASELINE_ATTEMPT_EXHAUSTED');
-        const adapter = new LiveOpportunityAdapter(this.api, this.config, [], {} as MarketFact);
+        const adapter = new LiveOpportunityAdapter(
+          this.api,
+          this.config,
+          [],
+          {} as MarketFact,
+          () => this.clock.now()
+        );
         const buy = await withGmgnContext(
           { priority: 'evaluation', purpose: 'baseline', deadlineMs: confirmedAtMs + 5000 },
           async () => {
@@ -612,5 +873,6 @@ export class TrialRuntime {
     while (this.running || this.outcomesRunning || this.maintenanceRunning)
       await this.clock.sleep(50);
     while (this.universePending.length) await this.drainUniverse();
+    await this.checkpointRotation();
   }
 }

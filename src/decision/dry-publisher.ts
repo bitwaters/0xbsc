@@ -32,7 +32,8 @@ export interface DryPreparation {
 export class PreparationFailure extends Error {
   constructor(
     reason: string,
-    readonly qualification: DryPreparation['qualification'] | null = null
+    readonly qualification: DryPreparation['qualification'] | null = null,
+    readonly details: Record<string, unknown> | null = null
   ) {
     super(reason);
   }
@@ -75,7 +76,8 @@ export async function dryPublish(input: {
   const original = structuredClone(input.state);
   const context = decisionContext(original, input.riskHash);
   let qualification: DryPreparation['qualification'] | null = null;
-  const cancelled = (reason: string) => ({
+  const cancelled = (reason: string, details: Record<string, unknown> | null = null) => ({
+    details,
     status: 'CANCELLED' as const,
     context,
     state: {
@@ -94,7 +96,7 @@ export async function dryPublish(input: {
   } catch (error) {
     if (error instanceof PreparationFailure) {
       qualification = error.qualification;
-      return cancelled(error.message);
+      return cancelled(error.message, error.details);
     }
     return cancelled('MISSING_PREPARATION');
   }
@@ -124,7 +126,14 @@ export async function dryPublish(input: {
     decision.stageResults.confirmation !== 'PASS' ||
     decision.stageResults.invalidation !== 'FAIL'
   )
-    return cancelled('FINAL_MARKET_RECHECK_FAILED');
+    return cancelled('FINAL_MARKET_RECHECK_FAILED', {
+      stage: 'FINAL_MARKET',
+      kind: 'market',
+      decision,
+      inputFactIds: prepared.latestFacts.map((f) => f.factId),
+      evaluationAtMs: now,
+      previousState: original
+    });
   const latest = fieldSamples(model.manifest.price_field, evaluateInput).at(-1);
   if (!latest) return cancelled('ENTRY_PRICE_MISSING');
   let cost: Decimal;
@@ -165,6 +174,7 @@ export async function dryPublish(input: {
   // Canonical serialized snapshot is the immutable review artifact. A caller cannot mutate its price later.
   return {
     status: 'DRY_READY' as const,
+    details: null,
     qualification,
     context,
     state: decision.state,

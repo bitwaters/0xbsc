@@ -24,11 +24,20 @@ const token = '0x' + 'a'.repeat(40),
   creator = '0x' + 'c'.repeat(40);
 const manifestPath = 'models/flow-momentum-trial-v1.json';
 const model = validateModel(JSON.parse(readFileSync(manifestPath, 'utf8')));
-async function fixture(change: { unsafe?: boolean; falling?: boolean } = {}) {
+async function fixture(
+  change: {
+    unsafe?: boolean;
+    falling?: boolean;
+    entrapment?: number;
+    missingCreator?: boolean;
+    missingVolume?: boolean;
+  } = {}
+) {
   let now = 20000,
     infoCount = 0,
     quoteCount = 0;
   let currentPool = pool;
+  const calls: string[] = [];
   const config = runtimeConfigSchema.parse(parse(readFileSync('config.example.yaml', 'utf8')));
   config.publication = { engine: 'trial', manifest_path: manifestPath, model_hash: model.hash };
   const storage = await Storage.open(':memory:');
@@ -41,16 +50,17 @@ async function fixture(change: { unsafe?: boolean; falling?: boolean } = {}) {
       onFact: () => {},
       transport: (input) => {
         now += 50;
+        calls.push(input.path);
         let data: unknown;
         switch (input.path) {
           case '/v1/token/info':
             data = {
               biggest_pool_address: currentPool,
               liquidity: 100000,
-              dev: { creator_address: creator },
+              dev: { creator_address: change.missingCreator ? '' : creator },
               price: {
                 price: String(1 + (change.falling ? -1 : 1) * ++infoCount * 0.001),
-                volume_1m: 5000,
+                volume_1m: change.missingVolume ? undefined : 5000,
                 volume_5m: 15000,
                 buy_volume_1m: 4000,
                 sell_volume_1m: 1000,
@@ -58,7 +68,7 @@ async function fixture(change: { unsafe?: boolean; falling?: boolean } = {}) {
               },
               stat: {
                 dev_team_hold_rate: 0,
-                top_entrapment_trader_percentage: 0,
+                top_entrapment_trader_percentage: change.entrapment ?? 0,
                 top_bundler_trader_percentage: 0,
                 top70_sniper_hold_rate: 0,
                 creator_hold_rate: 0.01,
@@ -113,19 +123,23 @@ async function fixture(change: { unsafe?: boolean; falling?: boolean } = {}) {
     5000,
     () => now
   );
-  const runtime = new TrialRuntime(storage, config, 'cfg', api, {
+  const clock = {
     now: () => now,
-    sleep: (ms) => {
+    sleep: (ms: number) => {
       now += ms;
       return Promise.resolve();
     },
     random: () => 0.5
-  });
+  };
+  const runtime = new TrialRuntime(storage, config, 'cfg', api, clock);
   await runtime.start();
   runtime.observe({ tokenAddress: token, decisionEligible: true } as NormalizedEvent);
   return {
     storage,
     runtime,
+    api,
+    clock,
+    calls,
     config,
     now: () => now,
     advance: () => {
@@ -382,6 +396,113 @@ void test('a failed preparation evidence batch rolls back every fact instead of 
       ).n,
       1
     );
+  } finally {
+    await f.runtime.close();
+    f.storage.close();
+  }
+});
+
+void test('known Info risk releases its slot without security, traders or quotes and persists cooldown across restart', async () => {
+  const change = { entrapment: 0.5 };
+  const f = await fixture(change);
+  let restarted: TrialRuntime | undefined;
+  try {
+    await f.runtime.tick();
+    assert.deepEqual(f.calls, ['/v1/token/info']);
+    assert.equal(f.runtime.snapshot().watching, 0);
+    assert.equal(f.runtime.snapshot().counts.entrapment_limit, 1);
+    const row = f.storage.db.prepare('SELECT details_json FROM trial_risk_rejections').get() as {
+      details_json: string;
+    };
+    assert.equal((JSON.parse(row.details_json) as { actual: string }).actual, '0.5');
+    await f.runtime.close();
+    restarted = new TrialRuntime(f.storage, f.config, 'cfg', f.api, f.clock);
+    await restarted.start();
+    f.advance();
+    restarted.observe({ tokenAddress: token, decisionEligible: true } as NormalizedEvent);
+    await restarted.tick();
+    assert.equal(f.calls.length, 1);
+    f.advance();
+    await restarted.tick();
+    assert.equal(f.calls.length, 1);
+    change.entrapment = 0;
+    f.advance();
+    await restarted.tick();
+    assert.ok(f.calls.length > 1);
+    assert.equal(f.quotes(), 0);
+  } finally {
+    if (restarted) await restarted.close();
+    else await f.runtime.close();
+    f.storage.close();
+  }
+});
+void test('creator absence is explicit before costly requests and unsafe basic contracts never warm traders', async () => {
+  for (const change of [{ missingCreator: true }, { unsafe: true }]) {
+    const f = await fixture(change);
+    try {
+      await f.runtime.tick();
+      assert.equal(f.calls.includes('/v1/market/token_top_traders'), false);
+      assert.equal(f.calls.includes('/v1/market/token_top_holders'), false);
+      assert.equal(f.quotes(), 0);
+      if ('missingCreator' in change) assert.equal(f.runtime.snapshot().counts.CREATOR_MISSING, 1);
+    } finally {
+      await f.runtime.close();
+      f.storage.close();
+    }
+  }
+});
+void test('missing market data rotates after a bounded retry without traders or quotes', async () => {
+  const f = await fixture({ missingVolume: true });
+  try {
+    for (let i = 0; i < 4; i++) {
+      await f.runtime.tick();
+      if (i < 3) f.advance();
+    }
+    assert.equal(f.runtime.snapshot().watching, 0);
+    assert.equal(f.runtime.snapshot().waiting, 1);
+    assert.equal(f.runtime.snapshot().counts.DATA_WAIT_ROTATED, 1);
+    assert.equal(f.quotes(), 0);
+    assert.ok(f.calls.every((path) => path === '/v1/token/info'));
+  } finally {
+    await f.runtime.close();
+    f.storage.close();
+  }
+});
+void test('a new pool bypasses the previous pool rejection but is fully checked again', async () => {
+  const change = { entrapment: 0.5 };
+  const f = await fixture(change);
+  try {
+    await f.runtime.tick();
+    const nextPool = '0x' + 'd'.repeat(40);
+    f.setPool(nextPool);
+    change.entrapment = 0;
+    f.runtime.observe({
+      tokenAddress: token,
+      decisionEligible: true,
+      payload: { biggest_pool_address: nextPool }
+    } as unknown as NormalizedEvent);
+    await f.runtime.tick();
+    assert.equal(f.calls.filter((path) => path === '/v1/token/info').length, 2);
+    assert.equal(f.runtime.snapshot().counts.BASIC_SAFETY_PASS, 1);
+    assert.equal(f.quotes(), 0);
+  } finally {
+    await f.runtime.close();
+    f.storage.close();
+  }
+});
+void test('a discovery burst beyond the old 2000 audit limit stays bounded and drains without stopping', async () => {
+  const f = await fixture({ entrapment: 0.5 });
+  try {
+    for (let i = 1; i <= 2500; i++)
+      f.runtime.observe({
+        tokenAddress: '0x' + i.toString(16).padStart(40, '0'),
+        decisionEligible: true
+      } as NormalizedEvent);
+    assert.equal(f.runtime.snapshot().waiting, 2501);
+    assert.equal(f.runtime.snapshot().failure, null);
+    await f.runtime.tick();
+    assert.equal(f.runtime.snapshot().failure, null);
+    assert.ok(f.runtime.snapshot().pendingUniverseWrites < 2501);
   } finally {
     await f.runtime.close();
     f.storage.close();

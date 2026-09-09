@@ -8,6 +8,8 @@ import { WBNB_ADDRESS, usdToWbnbAtoms } from '../quote/gmgn-provider.js';
 import type { QuoteObservation } from '../research/measurement.js';
 import type { DecisionContext } from './dry-publisher.js';
 import type { PreparationAdapter, RiskBundle } from './preparation.js';
+import { creatorAddress, screenBasic } from './risk-screen.js';
+import { PreparationFailure } from './dry-publisher.js';
 import { assessCoordinatedExit } from '../safety/coordinated-exit.js';
 
 /** The live adapter uses the common client/scheduler; no second key or transport. */
@@ -19,11 +21,16 @@ export class LiveOpportunityAdapter implements PreparationAdapter {
     private readonly api: CandidateGmgnApi,
     private readonly config: RuntimeConfig,
     private readonly priorFacts: MarketFact[],
-    private readonly traderBaseline: MarketFact
+    private readonly traderBaseline: MarketFact,
+    private readonly now: () => number = Date.now
   ) {}
   async fact(request: () => Promise<unknown>): Promise<MarketFact> {
     const fact = responseFact(await request());
-    if (!fact) throw new Error('PHYSICAL_FACT_MISSING');
+    if (!fact)
+      throw new PreparationFailure('PHYSICAL_FACT_MISSING', null, {
+        stage: 'CAPTURE',
+        kind: 'data'
+      });
     this.facts.push(fact);
     return fact;
   }
@@ -33,6 +40,9 @@ export class LiveOpportunityAdapter implements PreparationAdapter {
     const info = await this.fact(() => this.api.token('/v1/token/info', token));
     const security = await this.fact(() => this.api.token('/v1/token/security', token));
     const pool = await this.fact(() => this.api.token('/v1/token/pool_info', token));
+    const basic = screenBasic(info, security, pool, this.config, this.now());
+    if (basic)
+      throw new PreparationFailure(basic.reason, null, { stage: 'BASIC_SAFETY', ...basic });
     if (this.previous)
       return {
         ...this.previous,
@@ -44,10 +54,13 @@ export class LiveOpportunityAdapter implements PreparationAdapter {
       };
     const holders = await this.fact(() => this.api.holders(token));
     const traders = await this.fact(() => this.api.traders(token));
-    const creator =
-      (info.payload.dev as { creator_address?: string } | undefined)?.creator_address ??
-      (info.payload.pool as { creator?: string } | undefined)?.creator;
-    if (!creator) throw new Error('CREATOR_MISSING');
+    const creator = creatorAddress(info);
+    if (!creator)
+      throw new PreparationFailure('CREATOR_MISSING', null, {
+        stage: 'BASIC_SAFETY',
+        kind: 'data',
+        factIds: [info.factId]
+      });
     const created = await this.fact(() => this.api.createdTokens(creator));
     const prior = this.traderBaseline;
     if (
@@ -55,7 +68,11 @@ export class LiveOpportunityAdapter implements PreparationAdapter {
       prior.poolRevision !== ctx.poolRevision ||
       prior.receivedAtMs >= traders.requestedAtMs
     )
-      throw new Error('TRADER_BASELINE_IDENTITY');
+      throw new PreparationFailure('TRADER_BASELINE_IDENTITY', null, {
+        stage: 'TRADER_BASELINE',
+        kind: 'data',
+        factIds: [prior.factId, traders.factId]
+      });
     const traderBaseline = {
       atMs: prior.receivedAtMs,
       wallets: assessCoordinatedExit(
@@ -103,7 +120,8 @@ export class LiveOpportunityAdapter implements PreparationAdapter {
     const raw = await this.api.quote(query),
       fact = responseFact(raw),
       parsed = parseGmgnQuote(raw);
-    if (!fact || !parsed.routeAvailable) throw new Error('QUOTE_UNAVAILABLE');
+    if (!fact || !parsed.routeAvailable)
+      throw new PreparationFailure('QUOTE_UNAVAILABLE', null, { stage: 'QUOTE', kind: 'data' });
     this.facts.push(fact);
     const result: QuoteObservation = {
       ...(!buy ? { requestedNotionalUsd: '10' as const } : {}),
