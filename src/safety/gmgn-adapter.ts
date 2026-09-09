@@ -35,14 +35,24 @@ export function adaptGmgnSafety(input: { info: unknown; security: unknown; pool:
       pool: { sellable: sellableFromCanNotSell(security.can_not_sell) }
     },
     permission: {
-      ownerRenounced: security.is_renounced,
-      mintDisabled: security.renounced_mint,
+      chain: 'bsc',
+      ownerRenounced: ownerRenounced(security),
       hasDangerousPrivilege: dangerousPrivilege(security.privileges),
       poolKind: launchpad ? 'launchpad' : 'dex',
       lpLockedOrBurnedPercent: lockPercent(security),
       ...(launchpad ? { verifiedLaunchpadPool: true, verifiedLaunchpadMigration: true } : {})
     }
   };
+}
+
+function ownerRenounced(security: RecordValue): boolean | undefined {
+  const values = [security.is_renounced, security.owner_renounced].filter(
+    (value) => value !== undefined && value !== null
+  );
+  const normalized = values.map(normalizeBooleanFlag);
+  if (!normalized.length || normalized.includes(null) || new Set(normalized).size !== 1)
+    return undefined;
+  return normalized[0]!;
 }
 
 function dataRecord(value: unknown): RecordValue {

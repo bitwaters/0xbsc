@@ -81,9 +81,40 @@ export function trialReport(db: SqliteDatabase, runId: string) {
       "SELECT status,COUNT(*) AS count FROM evaluation_baselines WHERE run_id=? AND track='post_confirmation_quote_v1' GROUP BY status"
     )
     .all(runId);
+  const marketRiskIntersection = db
+    .prepare(
+      `
+    SELECT json_extract(metadata_json,'$.marketScreen.activation') market,
+      CASE WHEN json_extract(metadata_json,'$.stage')='EARLY_SAFETY'
+        THEN json_extract(metadata_json,'$.reason') ELSE 'INFO_RISK_PASS' END risk,
+      COUNT(*) evaluations,COUNT(DISTINCT json_extract(metadata_json,'$.token')) tokens
+    FROM operation_traces WHERE stage='trial_funnel' AND occurred_at_ms>=?
+      AND json_extract(metadata_json,'$.runId')=?
+      AND json_extract(metadata_json,'$.marketScreen.activation') IS NOT NULL
+    GROUP BY market,risk`
+    )
+    .all(run.created_at_ms, runId);
   const quoteExits = db
     .prepare(
       "SELECT e.status,COUNT(*) AS count,SUM(CASE WHEN json_extract(e.result_json,'$.multiple') IS NOT NULL THEN 1 ELSE 0 END) AS measured FROM research_quote_exits e JOIN evaluation_baselines b ON b.baseline_id=e.baseline_id WHERE b.run_id=? GROUP BY e.status"
+    )
+    .all(runId);
+  const candidateRows = db
+    .prepare(
+      `SELECT status,COALESCE(json_extract(risk_json,'$.reason'),'INFO_RISK_PASS') risk,
+      COUNT(*) tokens FROM research_trial_cohorts WHERE run_id=? GROUP BY status,risk`
+    )
+    .all(runId);
+  const candidateOutcomes = db
+    .prepare(
+      `WITH ranked AS (
+      SELECT c.baseline_id,t.target,json_extract(t.result_json,'$.outcome') outcome,
+        ROW_NUMBER() OVER (PARTITION BY c.baseline_id,t.target ORDER BY
+          CASE WHEN json_extract(t.result_json,'$.outcome') IN ('TP','SL') THEN 0 ELSE 1 END,
+          t.horizon_at_ms DESC) rn
+      FROM research_trial_cohorts c JOIN research_outcome_tasks t ON t.baseline_id=c.baseline_id
+      WHERE c.run_id=? AND t.result_json IS NOT NULL)
+    SELECT target,outcome,COUNT(*) tokens FROM ranked WHERE rn=1 GROUP BY target,outcome`
     )
     .all(runId);
   return {
@@ -95,6 +126,13 @@ export function trialReport(db: SqliteDatabase, runId: string) {
     promotionCertificate: false,
     deliveryCounts,
     coverage,
+    marketRiskIntersection,
+    candidateDiagnostics: {
+      label: '首个行情合格参考价；含风险拒绝样本，未验证可成交性，不代表正式信号命中率',
+      selection: '按首次到达选取，最多20个活跃样本；资源排除单列，非随机样本',
+      cohorts: candidateRows,
+      outcomes: candidateOutcomes
+    },
     reasons,
     cardReference: {
       label: '相对冻结卡片参考价的诊断；来源时钟未知，不代表确认后可成交收益',

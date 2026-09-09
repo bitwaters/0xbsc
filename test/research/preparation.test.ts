@@ -66,7 +66,7 @@ function bundle(at = 20000): RiskBundle {
       top_10_holder_rate: 0.01,
       can_not_sell: false,
       is_renounced: true,
-      renounced_mint: true,
+      renounced_mint: false,
       lock_summary: { lock_percent: 1 }
     }),
     pool: fact('/v1/token/pool_info', { address: pool }),

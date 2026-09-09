@@ -109,6 +109,7 @@ const shapes: Record<string, Shape> = {
     open_source: true,
     can_not_sell: true,
     is_renounced: true,
+    owner_renounced: true,
     renounced_mint: true,
     privileges: [true],
     lock_summary: { lock_percent: true, lock_detail: [{ is_blackhole: true, percent: true }] }

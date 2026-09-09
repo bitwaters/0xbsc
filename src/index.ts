@@ -110,7 +110,8 @@ const scheduler = new GmgnScheduler(
   loaded.config.gmgn.rate_limit.burst_reserve_weight,
   {
     paced: true,
-    researchEnabled: ['collect', 'execute_shadow'].includes(loaded.config.research?.mode ?? 'off'),
+    researchEnabled:
+      isTrial || ['collect', 'execute_shadow'].includes(loaded.config.research?.mode ?? 'off'),
     maxConcurrent: loaded.config.gmgn.rate_limit.max_in_flight ?? 4,
     channelIntervalsMs: { quote: loaded.config.gmgn.rate_limit.quote_min_interval_ms ?? 600 },
     channelCompletionIntervalsMs: {
@@ -182,14 +183,14 @@ const trialTimer = trialRuntime
       void trialRuntime
         .tick()
         .catch(() => console.error(JSON.stringify({ event: 'trial_tick_failed' })));
-    }, 250)
+    }, 100)
   : null;
 const trialOutcomeTimer = trialRuntime
   ? setInterval(() => {
       void trialRuntime
         .outcomeTick()
         .catch(() => console.error(JSON.stringify({ event: 'trial_outcome_failed' })));
-    }, 1000)
+    }, 250)
   : null;
 const researchRuntime =
   researchRecorder && ['collect', 'execute_shadow'].includes(researchRecorder.config.mode)

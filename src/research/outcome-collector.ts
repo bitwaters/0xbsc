@@ -42,7 +42,8 @@ export class OutcomeCollector {
       marketBaselineId: string,
       target: number,
       atMs: number
-    ) => Promise<void>
+    ) => Promise<void>,
+    private readonly scope: 'all' | 'published' | 'candidates' = 'all'
   ) {
     this.store = new MeasurementStore(research.storage);
     this.archive = new ResearchArchive(
@@ -52,6 +53,15 @@ export class OutcomeCollector {
   }
   /** Enqueue only the next cadence, rather than occupying the bounded queue with an entire day. */
   async scheduleNext(baselineId: string) {
+    if (
+      this.research.storage.db
+        .prepare(
+          `SELECT 1 FROM research_outcome_tasks
+      WHERE baseline_id=? AND status IN ('PENDING','RUNNING') LIMIT 1`
+        )
+        .get(baselineId)
+    )
+      return;
     const row = (await this.research.storage.write(() =>
       this.research.storage.db
         .prepare(
@@ -66,7 +76,8 @@ export class OutcomeCollector {
       ![
         'post_confirmation_market_v1',
         'decision_market_replay_v1',
-        'trial_card_reference_v1'
+        'trial_card_reference_v1',
+        'candidate_reference_v1'
       ].includes(row.track)
     )
       return;
@@ -74,7 +85,18 @@ export class OutcomeCollector {
       (at) => at > (row.last ?? row.available_at_ms)
     );
     if (next === undefined) return;
-    for (const target of p.targets) await this.store.schedule(baselineId, target, next, next);
+    for (const target of p.targets) {
+      const resolved = this.research.storage.db
+        .prepare(
+          `SELECT 1 FROM research_outcome_tasks
+        WHERE baseline_id=? AND target=? AND (json_extract(result_json,'$.outcome') IN ('TP','SL')
+        OR (json_extract(result_json,'$.outcome')='UNKNOWN' AND json_extract(result_json,'$.reason')
+        IN ('BOUNDARY_TOUCH_ORDER','SAME_CANDLE_ORDER','CONFLICTING_CANDLE'))) LIMIT 1`
+        )
+        .get(baselineId, String(target));
+      if (!resolved)
+        await this.store.schedule(baselineId, target, next, Math.ceil(next / 30000) * 30000 + 1000);
+    }
   }
   async tick(): Promise<boolean> {
     if (this.running) return false;
@@ -86,9 +108,12 @@ export class OutcomeCollector {
             `SELECT t.*,b.run_id,b.price,b.available_at_ms,b.fact_id,b.details_json,o.token,o.pool_revision
         FROM research_outcome_tasks t JOIN evaluation_baselines b ON b.baseline_id=t.baseline_id
         JOIN market_opportunities o ON o.opportunity_id=b.opportunity_id
-        WHERE t.status='PENDING' AND t.task_kind='market' AND t.due_at_ms<=? ORDER BY t.due_at_ms,t.task_id LIMIT 1`
+        WHERE t.status='PENDING' AND t.task_kind='market' AND t.due_at_ms<=?
+        AND (?='all' OR (?='candidates' AND b.track='candidate_reference_v1')
+          OR (?='published' AND b.track!='candidate_reference_v1'))
+        ORDER BY t.due_at_ms,t.task_id LIMIT 1`
           )
-          .get(this.now())
+          .get(this.now(), this.scope, this.scope, this.scope)
       )) as TaskRow | undefined;
       if (!task || !(await this.store.claim(task.task_id, this.now()))) return false;
       const end = task.available_at_ms + p.horizonMs;
@@ -110,6 +135,7 @@ export class OutcomeCollector {
       try {
         for (const segment of segments) {
           const key = hashValue([
+            'closed-candle-v2',
             'bsc',
             task.token,
             task.pool_revision,
@@ -160,6 +186,7 @@ export class OutcomeCollector {
             .sort((a, b) => a - b);
           if (
             !fact.qualityFlags.length &&
+            segment.to <= fact.requestedAtMs &&
             times[0] === segment.from &&
             times.at(-1)! + 30000 === segment.to &&
             times.every((at, i) => at === segment.from + i * 30000)

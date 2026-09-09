@@ -1,5 +1,6 @@
 import { TrialRotation, type WaitingCandidate } from './trial-rotation.js';
 import { screenInfo, screenBasic, type RiskFinding } from './risk-screen.js';
+import { marketScreen, type MarketScreen } from './market-screen.js';
 import { randomUUID } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import type { RuntimeConfig } from '../config/types.js';
@@ -16,6 +17,7 @@ import { measureResearchInBackground } from '../research/maintenance.js';
 import { MeasurementStore } from '../research/measurement-store.js';
 import { OutcomeCollector } from '../research/outcome-collector.js';
 import { QuoteExitCollector } from '../research/quote-exits.js';
+import { TrialCohort } from '../research/trial-cohort.js';
 import { quoteBaseline } from '../research/measurement.js';
 import { hashValue } from '../research/protocol.js';
 import { semanticBuild } from '../research/contracts.js';
@@ -51,8 +53,11 @@ export class TrialRuntime {
   readonly measurements;
   readonly outcomes;
   readonly exits;
+  readonly candidateOutcomes;
+  readonly cohort;
   private watches = new Map<string, Watch>();
   private running = false;
+  private readonly processing = new Set<string>();
   private closed = false;
   private maintenanceRunning = false;
   private lastMaintenance = 0;
@@ -83,6 +88,7 @@ export class TrialRuntime {
       this.codeHash.slice(0, 8);
     this.research = new ResearchStorage(storage);
     this.measurements = new MeasurementStore(storage);
+    this.cohort = new TrialCohort(storage, this.runId, this.model.hash);
     this.outcomes = new OutcomeCollector(
       this.research,
       () => clock.now(),
@@ -110,7 +116,31 @@ export class TrialRuntime {
           )
           .get(baselineId) as { baseline_id: string } | undefined;
         if (paired) await this.exits.schedule(paired.baseline_id, `target_${target}`, atMs);
-      }
+      },
+      'published'
+    );
+    this.candidateOutcomes = new OutcomeCollector(
+      this.research,
+      () => clock.now(),
+      (token, pool, fromMs, toMs) =>
+        withGmgnContext(
+          {
+            research: true,
+            priority: 'evaluation',
+            purpose: 'outcome',
+            deadlineMs: clock.now() + 5000
+          },
+          async () => {
+            const info = responseFact(await api.token('/v1/token/info', token));
+            if (!info || info.poolRevision !== pool) throw new Error('OUTCOME_POOL_CHANGED');
+            await this.saveFact(info);
+            const fact = responseFact(await api.kline(token, '30s', { fromMs, toMs }));
+            if (!fact || fact.poolRevision !== pool) throw new Error('OUTCOME_POOL_CHANGED');
+            return fact;
+          }
+        ),
+      undefined,
+      'candidates'
     );
     this.exits = new QuoteExitCollector(
       storage,
@@ -154,6 +184,12 @@ export class TrialRuntime {
           staleMs: this.rotation.liveMs
         },
         riskScreen: 'existing-info-and-basic-limits-v1',
+        marketWorkers: 3,
+        candidateDiagnostics: {
+          track: 'candidate_reference_v1',
+          activeCapacity: 20,
+          budget: 'research'
+        },
         inactiveRotationMs: 30000,
         readmissionDelayMs: 30000,
         pollMs: 10000
@@ -182,6 +218,13 @@ export class TrialRuntime {
       });
     await this.calibrate();
     await this.measurements.recover(this.clock.now());
+    for (const row of this.storage.db
+      .prepare(
+        `SELECT baseline_id FROM evaluation_baselines
+      WHERE track='candidate_reference_v1' AND status='VALID' AND available_at_ms>?`
+      )
+      .all(this.clock.now() - 86400000) as { baseline_id: string }[])
+      await this.candidateOutcomes.scheduleNext(row.baseline_id);
     await this.exits.recover();
     // Confirmed sends whose follow-up was interrupted retain MISSING, never a later lower entry.
     const sent = this.storage.db
@@ -348,7 +391,7 @@ export class TrialRuntime {
       }
     });
   }
-  private async reject(w: Watch, finding: RiskFinding) {
+  private async reject(w: Watch, finding: RiskFinding, screen?: MarketScreen) {
     const now = this.clock.now();
     this.count(finding.reason);
     this.count('EARLY_RISK_REJECTED');
@@ -394,6 +437,7 @@ export class TrialRuntime {
             reason: finding.reason,
             stage: 'EARLY_SAFETY',
             details: finding,
+            marketScreen: screen,
             opportunityId: prior?.opportunityId
           })
         );
@@ -431,7 +475,9 @@ export class TrialRuntime {
       maxAdmissionWaitMs: this.maxAdmissionWaitMs,
       activatedWatching: [...this.watches.values()].filter((w) => w.activated).length,
       pendingUniverseWrites: this.universePending.length,
-      running: this.running,
+      running: this.running || this.processing.size > 0,
+      activeMarketWorkers: this.processing.size,
+      factStorage: { bytes: this.research.quotaBytes(), maximumBytes: MAX_BYTES },
       lastTickAtMs: this.lastTickAtMs,
       failure: this.failure,
       counts: this.counts
@@ -467,7 +513,7 @@ export class TrialRuntime {
     this.lastMaintenance = this.clock.now();
   }
   async tick() {
-    if (this.running || this.closed || this.failure) return;
+    if (this.running || this.processing.size >= 3 || this.closed || this.failure) return;
     if (this.clock.now() - this.lastMaintenance > 60000 && !this.maintenanceRunning) {
       this.maintenanceRunning = true;
       void this.calibrate()
@@ -479,15 +525,20 @@ export class TrialRuntime {
         });
     }
     this.running = true;
+    let dispatchOwned = true;
+    let processingToken: string | undefined;
     this.lastTickAtMs = this.clock.now();
     try {
       await this.drainUniverse();
       for (const [key, w] of this.watches)
-        if (this.clock.now() - w.seenAtMs > 120000 || this.clock.now() - w.firstAtMs > 600000)
+        if (
+          !this.processing.has(key) &&
+          (this.clock.now() - w.seenAtMs > 120000 || this.clock.now() - w.firstAtMs > 600000)
+        )
           this.watches.delete(key);
       this.admit();
       const watch = [...this.watches.values()]
-        .filter((w) => w.dueAtMs <= this.clock.now())
+        .filter((w) => w.dueAtMs <= this.clock.now() && !this.processing.has(w.token))
         .sort(
           (a, b) =>
             Number(b.activated) - Number(a.activated) ||
@@ -515,6 +566,10 @@ export class TrialRuntime {
         this.release(watch, cached.expiresAtMs);
         return;
       }
+      processingToken = watch.token;
+      this.processing.add(watch.token);
+      this.running = false;
+      dispatchOwned = false;
       await withGmgnContext(
         { priority: 'candidate', purpose: 'legacy_formal', deadlineMs: this.clock.now() + 30000 },
         async () => {
@@ -563,11 +618,20 @@ export class TrialRuntime {
             );
           }
           watch.pool = info.poolRevision;
+          const screen = marketScreen(this.model.manifest, info, this.clock.now());
+          this.count('SCREEN_MARKET_' + screen.activation);
           const infoRisk = screenInfo(info, this.config, this.clock.now());
+          const baseline = await this.cohort.register(info, screen, infoRisk);
+          if (baseline) {
+            await this.candidateOutcomes.scheduleNext(baseline);
+            this.count('CANDIDATE_BASELINE_REGISTERED');
+          }
           if (infoRisk) {
-            await this.reject(watch, infoRisk);
+            this.count('SCREEN_RISK_' + infoRisk.kind.toUpperCase());
+            await this.reject(watch, infoRisk, screen);
             return;
           }
+          this.count('SCREEN_RISK_PASS');
           watch.facts = [
             ...watch.facts.filter((f) => this.clock.now() - f.receivedAtMs <= 60000),
             info
@@ -610,6 +674,8 @@ export class TrialRuntime {
               modelHash: this.model.hash,
               reason: decision.reason,
               stages: decision.stageResults,
+              requiredFacts: decision.requiredFacts,
+              marketScreen: screen,
               evaluationAtMs,
               inputFactIds: watch.facts.map((f) => f.factId),
               previousState: previous,
@@ -761,7 +827,8 @@ export class TrialRuntime {
         metadata: { runId: this.runId, reason }
       });
     } finally {
-      this.running = false;
+      if (dispatchOwned) this.running = false;
+      if (processingToken) this.processing.delete(processingToken);
     }
   }
   private outcomesRunning = false;
@@ -769,7 +836,8 @@ export class TrialRuntime {
     if (this.outcomesRunning || this.closed) return;
     this.outcomesRunning = true;
     try {
-      if (!(await this.exits.tick())) await this.outcomes.tick();
+      if (!(await this.exits.tick()) && !(await this.outcomes.tick()))
+        await this.candidateOutcomes.tick();
     } finally {
       this.outcomesRunning = false;
     }
@@ -870,7 +938,7 @@ export class TrialRuntime {
   }
   async close() {
     this.closed = true;
-    while (this.running || this.outcomesRunning || this.maintenanceRunning)
+    while (this.running || this.processing.size || this.outcomesRunning || this.maintenanceRunning)
       await this.clock.sleep(50);
     while (this.universePending.length) await this.drainUniverse();
     await this.checkpointRotation();

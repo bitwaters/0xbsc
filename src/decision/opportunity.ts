@@ -123,7 +123,11 @@ export function evaluateOpportunity(
       );
     return result(
       previous,
-      Object.values(predicates).includes('UNKNOWN') ? 'DATA_WAIT' : 'NO_NEW_FACT'
+      previous.status === 'WATCHING' && predicates.activation === 'FAIL'
+        ? 'NO_NEW_FACT'
+        : Object.values(predicates).includes('UNKNOWN')
+          ? 'DATA_WAIT'
+          : 'NO_NEW_FACT'
     );
   }
   const state = {

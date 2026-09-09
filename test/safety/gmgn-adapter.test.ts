@@ -22,7 +22,7 @@ void test('maps audited GMGN security fields and keeps unknown values fail-close
         top_10_holder_rate: '0.4',
         flags: [],
         is_renounced: true,
-        renounced_mint: true,
+        renounced_mint: false,
         privileges: null,
         lock_summary: {
           lock_percent: '0.1',
@@ -36,8 +36,8 @@ void test('maps audited GMGN security fields and keeps unknown values fail-close
   assert.equal(adapted.deep.security.top10Percent, '0.4');
   assert.equal(adapted.deep.pool.sellable, true);
   assert.deepEqual(adapted.permission, {
+    chain: 'bsc',
     ownerRenounced: true,
-    mintDisabled: true,
     hasDangerousPrivilege: false,
     poolKind: 'dex',
     lpLockedOrBurnedPercent: 0.8
@@ -110,5 +110,41 @@ void test('explicit risk flags override empty flags and an affirmative sellabili
   assert.equal(
     evaluateDeepSafety(conflict.deep, thresholds, new Set()).reason,
     'security_field_conflict:closed_source'
+  );
+});
+
+void test('BSC permissions use EVM ownership; Solana defaults do not block a verified ordinary pool', async () => {
+  const { evaluatePermissionAndLpSafety } = await import('../../src/safety/permission-gate.js');
+  const security = {
+    is_renounced: true,
+    renounced_mint: false,
+    privileges: null,
+    lock_summary: { lock_percent: '0.8' }
+  };
+  const check = (changes: Record<string, unknown>) =>
+    evaluatePermissionAndLpSafety(
+      adaptGmgnSafety({ info: {}, security: { ...security, ...changes }, pool: {} }).permission,
+      0.8
+    );
+  assert.equal(check({}).allowed, true);
+  assert.equal(check({ is_renounced: false }).reason, 'owner_privilege_unverified');
+  assert.equal(check({ is_renounced: undefined }).reason, 'owner_privilege_unverified');
+  assert.equal(check({ is_renounced: undefined, owner_renounced: 'yes' }).allowed, true);
+  assert.equal(check({ owner_renounced: 'no' }).reason, 'owner_privilege_unverified');
+  assert.equal(check({ privileges: ['mint'] }).reason, 'dangerous_privilege_unverified');
+  assert.equal(check({ lock_summary: { lock_percent: 0.79 } }).reason, 'lp_lock_limit');
+  assert.equal(
+    evaluatePermissionAndLpSafety(
+      {
+        chain: 'sol',
+        ownerRenounced: true,
+        mintDisabled: false,
+        hasDangerousPrivilege: false,
+        poolKind: 'dex',
+        lpLockedOrBurnedPercent: 0.8
+      },
+      0.8
+    ).reason,
+    'mint_privilege_unverified'
   );
 });

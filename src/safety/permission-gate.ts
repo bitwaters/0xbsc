@@ -1,6 +1,8 @@
 import { normalizeRate } from './normalize.js';
 
 export interface PermissionSafetyData {
+  /** Solana mint authority does not describe an EVM contract's permissions. */
+  chain?: 'bsc' | 'sol';
   ownerRenounced?: unknown;
   mintDisabled?: unknown;
   hasDangerousPrivilege?: unknown;
@@ -28,7 +30,8 @@ export function evaluatePermissionAndLpSafety(
     return { allowed: true, reason: null, usedLaunchpadException: true };
   }
   if (data.ownerRenounced !== true) return rejected('owner_privilege_unverified');
-  if (data.mintDisabled !== true) return rejected('mint_privilege_unverified');
+  if (data.chain !== 'bsc' && data.mintDisabled !== true)
+    return rejected('mint_privilege_unverified');
   if (data.hasDangerousPrivilege !== false) return rejected('dangerous_privilege_unverified');
   if (data.poolKind !== 'dex') return rejected('pool_lifecycle_unmapped');
   try {

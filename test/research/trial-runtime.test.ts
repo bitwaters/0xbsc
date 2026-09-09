@@ -1,4 +1,5 @@
 import type { MarketFact } from '../../src/gmgn/facts.js';
+import { setImmediate } from 'node:timers/promises';
 import { trialReport } from '../../src/research/trial-report.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
@@ -83,7 +84,7 @@ async function fixture(
               top_10_holder_rate: 0.01,
               can_not_sell: change.unsafe ?? false,
               is_renounced: true,
-              renounced_mint: true,
+              renounced_mint: false,
               lock_summary: { lock_percent: 1 }
             };
             break;
@@ -254,7 +255,11 @@ void test('trial runs actual fact adapter to safety, immutable new-format outbox
     );
     assert.equal(
       (
-        f.storage.db.prepare('SELECT COUNT(*) AS n FROM research_outcome_tasks').get() as {
+        f.storage.db
+          .prepare(
+            "SELECT COUNT(*) AS n FROM research_outcome_tasks t JOIN evaluation_baselines b ON b.baseline_id=t.baseline_id WHERE b.track='trial_card_reference_v1'"
+          )
+          .get() as {
           n: number;
         }
       ).n,
@@ -334,15 +339,17 @@ void test('pool migration invalidates the persisted old opportunity before any n
     f.advance();
     await f.runtime.tick();
     const old = f.storage.db
-      .prepare('SELECT state,anchor_price FROM market_opportunities')
-      .get() as { state: string; anchor_price: string };
+      .prepare('SELECT state,anchor_price FROM market_opportunities WHERE model_hash=?')
+      .get(f.runtime.model.hash) as { state: string; anchor_price: string };
     assert.equal(old.state, 'READY');
     f.setPool('0x' + 'd'.repeat(40));
     f.advance();
     await f.runtime.tick();
     const after = f.storage.db
-      .prepare('SELECT state,anchor_price FROM market_opportunities WHERE pool_revision=?')
-      .get(pool) as { state: string; anchor_price: string };
+      .prepare(
+        'SELECT state,anchor_price FROM market_opportunities WHERE pool_revision=? AND model_hash=?'
+      )
+      .get(pool, f.runtime.model.hash) as { state: string; anchor_price: string };
     assert.equal(after.state, 'INVALIDATED');
     assert.equal(after.anchor_price, old.anchor_price);
     assert.equal(f.quotes(), 0);
@@ -504,6 +511,83 @@ void test('a discovery burst beyond the old 2000 audit limit stays bounded and d
     assert.equal(f.runtime.snapshot().failure, null);
     assert.ok(f.runtime.snapshot().pendingUniverseWrites < 2501);
   } finally {
+    await f.runtime.close();
+    f.storage.close();
+  }
+});
+
+void test('risk rejection retains market pass, actual inputs and thresholds rather than hiding the opportunity', async () => {
+  const f = await fixture({ entrapment: 0.5 });
+  try {
+    await f.runtime.tick();
+    const report = trialReport(f.storage.db, f.runtime.runId);
+    assert.deepEqual(report.marketRiskIntersection, [
+      { market: 'PASS', risk: 'entrapment_limit', evaluations: 1, tokens: 1 }
+    ]);
+    const trace = f.storage.db
+      .prepare(
+        "SELECT metadata_json FROM operation_traces WHERE stage='trial_funnel' AND json_extract(metadata_json,'$.reason')='entrapment_limit'"
+      )
+      .get() as { metadata_json: string };
+    const { marketScreen } = JSON.parse(trace.metadata_json) as {
+      marketScreen: {
+        values: Record<string, string | null>;
+        conditions: { status: string; threshold: string }[];
+      };
+    };
+    assert.equal(marketScreen.values.volume, '5000');
+    assert.equal(marketScreen.conditions[0]?.threshold, '30000');
+    assert.ok(marketScreen.conditions.every((c) => c.status === 'PASS'));
+    assert.equal(f.quotes(), 0);
+    assert.deepEqual(report.candidateDiagnostics.cohorts, [
+      { status: 'SELECTED', risk: 'entrapment_limit', tokens: 1 }
+    ]);
+  } finally {
+    await f.runtime.close();
+    f.storage.close();
+  }
+});
+
+void test('bounded market workers make progress across slow tokens without concurrent work on the same token', async () => {
+  const f = await fixture({ entrapment: 0.5 });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const tokenCall = f.api.token.bind(f.api),
+    started: string[] = [];
+  f.api.token = async (...args) => {
+    if (args[0] === '/v1/token/info') {
+      started.push(args[1]);
+      await gate;
+    }
+    return tokenCall(...args);
+  };
+  const jobs: Promise<void>[] = [];
+  try {
+    for (let i = 1; i <= 4; i++)
+      f.runtime.observe({
+        tokenAddress: '0x' + i.toString(16).padStart(40, '0'),
+        decisionEligible: true
+      } as NormalizedEvent);
+    for (let i = 0; i < 3; i++) {
+      jobs.push(f.runtime.tick());
+      for (let attempts = 0; started.length < i + 1 && attempts < 30; attempts++)
+        await setImmediate();
+      assert.equal(started.length, i + 1);
+      f.advance(); // Even when the first token is due again, it cannot get another worker.
+    }
+    await f.runtime.tick();
+    assert.equal(started.length, 3);
+    assert.equal(new Set(started).size, 3);
+    assert.equal(f.runtime.snapshot().activeMarketWorkers, 3);
+    release();
+    await Promise.all(jobs);
+    assert.equal(f.runtime.snapshot().activeMarketWorkers, 0);
+    assert.equal(f.runtime.snapshot().failure, null);
+  } finally {
+    release();
+    await Promise.all(jobs);
     await f.runtime.close();
     f.storage.close();
   }

@@ -158,7 +158,7 @@ void test('four outcome targets reuse one physical range and schedule only the n
     });
     const collector = new OutcomeCollector(
       research,
-      () => epoch + 30100,
+      () => epoch + 31100,
       (address, p, fromMs, toMs) => {
         calls++;
         return Promise.resolve(
@@ -186,6 +186,12 @@ void test('four outcome targets reuse one physical range and schedule only the n
       }
     );
     await collector.scheduleNext(id);
+    await collector.scheduleNext(id);
+    assert.equal(
+      (storage.db.prepare('SELECT COUNT(*) n FROM research_outcome_tasks').get() as { n: number })
+        .n,
+      4
+    );
     for (let i = 0; i < 4; i++) assert.equal(await collector.tick(), true);
     assert.equal(calls, 1);
     assert.deepEqual(
@@ -196,7 +202,7 @@ void test('four outcome targets reuse one physical range and schedule only the n
         .all(),
       [
         { status: 'DONE', n: 4 },
-        { status: 'PENDING', n: 4 }
+        { status: 'PENDING', n: 3 }
       ]
     );
     const row = storage.db

@@ -19,6 +19,7 @@ export const measurementProtocol = Object.freeze({
   hotTasks: 200
 });
 export type BaselineTrack =
+  | 'candidate_reference_v1'
   | 'trial_card_reference_v1'
   | 'card_reference_legacy'
   | 'post_confirmation_market_v1'
